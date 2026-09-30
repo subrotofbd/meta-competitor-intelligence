@@ -252,3 +252,223 @@ NOT modified: `main.py`, `AGENTS.md`, `ARCHITECTURE.md`, `DATA_ACCESS.md`,
 NOT started. Requires explicit human approval.
 
 Also worth deciding at or before S0.3: whether to gate the FastAPI docs routes on `app_env`.
+
+---
+
+## 2026-09-30, Checkpoint S0.3 -- Provider + AI + Media + JobQueue Interfaces (COMPLETE)
+
+Started on explicit human approval. Fully offline: no Meta, Facebook, Instagram, Apify, OpenAI
+or Gemini was contacted, and no HTTP client is installed or imported anywhere in `backend/app`.
+
+### Files created (24)
+
+**Application (12)**
+- `backend/app/providers/__init__.py` -- package charter for the two provider seams.
+- `backend/app/providers/data/__init__.py`
+- `backend/app/providers/data/provenance.py` -- `DataOrigin`, `EvidenceClass`, `evidence_class_for()`.
+- `backend/app/providers/data/errors.py` -- `ProviderError` + `RateLimited` / `Blocked` /
+  `SchemaChanged` / `Transient`.
+- `backend/app/providers/data/models.py` -- `RawPayload`, `HttpUrl`, `AdFormat`, `PageRef`,
+  `MediaRef`, `RawAdRecord`, `ProviderCapabilities`, `RequestMeta`, `CostEstimate`,
+  `ProviderResult`, `CanaryResult`.
+- `backend/app/providers/data/base.py` -- the `AdDataProvider` Protocol.
+- `backend/app/providers/data/mock.py` -- `MockBatch`, `MockPage`, `MockProvider`.
+- `backend/app/providers/ai/__init__.py`
+- `backend/app/providers/ai/models.py` -- `Confidence`, `CopyAnalysisRequest`, `CopyAnalysis`.
+- `backend/app/providers/ai/base.py` -- the `AIProvider` Protocol.
+- `backend/app/providers/ai/mock.py` -- `MockAIProvider`.
+- `backend/app/services/media.py` -- `content_key`, `content_key_for`, `StoredAsset`,
+  `MediaStore` Protocol, `LocalFsStore`.
+- `backend/app/services/jobs.py` -- `JobRequest`, `ClaimedJob`, `JobQueue` Protocol,
+  `JobQueueUnavailable`, `PostgresJobQueue`.
+- `backend/app/composition.py` -- the composition root (`build_ad_provider`, `build_ai_provider`).
+
+**Tests and fixtures (10)**
+- `backend/tests/_ast_probe.py` -- shared AST/import probes for the boundary tests.
+- `backend/tests/fixtures/ad_provider/corpus.json` -- the sanitized ad corpus.
+- `backend/tests/fixtures/ai/analyses.json` -- English, Hindi/Hinglish and sparse analyses.
+- `backend/tests/test_provenance.py`, `test_provider_contracts.py`, `test_provider_errors.py`,
+  `test_mock_provider.py`, `test_ai_provider.py`, `test_media_store.py`, `test_job_queue.py`,
+  `test_architecture_boundaries.py`, `test_offline_guard.py`, `test_fixture_safety.py`.
+
+### Files modified (3)
+- `backend/tests/conftest.py` -- **purely additive** (+97/-0). S0.3 fixtures: `fixed_clock`,
+  `mock_pages`, `mock_analyses`, `ad_provider`, `ai_provider`, `no_network`.
+- `backend/tests/test_config.py` -- one line. A `# noqa: S106` became redundant once the ruff
+  per-file-ignore started working (see findings); replaced with a comment keeping its intent.
+- `pyproject.toml` -- three fixes, each required by S0.3 (see findings).
+
+### Database
+**No migration. No schema change. No new table.** `alembic heads` is still `0001_pg_trgm` and
+`database/migrations/versions/` still holds exactly one file. S0.3 is interface-only, and the
+checkpoint brief forbade a migration unless an interface demanded one.
+
+### Design decisions worth keeping
+- **`retryable` is a class attribute on `ProviderError`, not an `isinstance` chain.** One flag
+  tells orchestration whether a failure may be retried. Adding a fifth failure mode later
+  cannot fall through as "unknown, ignore". `Blocked` and `SchemaChanged` are `False`, which
+  the tests assert directly.
+- **`RawPayload` is the only untyped value in the contract.** A provider's response is
+  genuinely opaque; it is hashed and stored before parsing. Every field the product *uses* is a
+  declared, validated, frozen model field.
+- **A provider's own `ad_status` is kept, untranslated.** `provider_active` is a domain status
+  decided later from our own complete runs, not a copy of the provider's wording. A test asserts
+  `RawAdRecord` has no `current_status`, `first_seen_at`, `content_hash`, `copy_hash` or
+  `creative_hash` field -- that is the AGENTS.md section 8 merge, made mechanically detectable.
+- **URLs are validated at the boundary** (`http`/`https` only, on `PageRef.url`,
+  `RawAdRecord.destination_url` and `MediaRef.source_url`). These URLs are fetched by a later
+  checkpoint; a provider could otherwise hand back `file:///etc/passwd`. Tested with 5 hostile
+  schemes.
+- **`LocalFsStore.put` refuses bytes that do not hash to the given key.** Content addressing was
+  previously only intended; a caller could have filed different bytes under an existing key and
+  every later `creative_hash` comparison would have become a comparison of lies. The store takes
+  bytes and never a URL, so it structurally cannot fetch.
+- **`PostgresJobQueue` is a fail-closed boundary, not a working queue.** S0.3 adds no migration,
+  so every operation raises `JobQueueUnavailable` naming S1.2. It is not a stub waiting to be
+  filled in on spec: a queue designed before the consumer exists is designed against imagined
+  requirements. Its one real behaviour is validating the table name, which matters because SQL
+  cannot bind a table name as a parameter.
+- **`MockProvider` and `MockAIProvider` take their corpus by constructor injection.** Neither
+  reads a file, opens a socket, or consults a clock of its own. Fixtures live in
+  `backend/tests/fixtures/` where they belong, and the mocks are usable unchanged from a script.
+- **`MockProvider.origin` is `third_party`**, so mock data resolves to `PROVIDER_DATA` and can
+  never be badged `VERIFIED_PUBLIC_DATA`. Tested.
+- **`serves_commercial_ads` is a required field of `ProviderCapabilities`**, with no default.
+  Meta's own API does not serve Indian commercial ads; a provider must declare that rather than
+  return empty pages forever.
+- **The composition root was added although the brief did not list it.** Without a single wiring
+  point, "MockProvider is a first-class provider" and "concrete providers are imported only from
+  the root" are both unfalsifiable. It is 2 functions, each annotated as returning the *Protocol*
+  so a caller cannot reach through to the concrete type. A test reads the annotations.
+- **`ad_status` naming kept from the brief; field renamed to `display_format`** to avoid
+  shadowing the `format` builtin, since it is the ad's creative shape.
+
+### MockProvider corpus (9 records, 3 pages, 6 batches, 100% synthetic)
+| Page | Records | What it covers |
+|---|---|---|
+| `mock-page-0001` Aurora Kitchen Studio (IN) | 4 over 3 batches | 1 image ad, 2 video ad, 3 carousel ad (3 media), 5 varied dates, 6 `facebook`/`instagram`/`messenger`, 7 `IN`+`GB`, 8 distinct landing pages, 10 **same ad id re-served with changed copy** |
+| `mock-page-0002` Northwind Fitness Club (GB) | 3 over 2 batches | 6 `audience_network`, 7 `GB`+`IE`, 8 second landing page, 9 **repeated creative** (`mock-media-shared-01` on two ads), plus a sparse record with an unmodelled `DYNAMIC` format |
+| `mock-page-0003` Coastal Ayurveda (IN/US) | 2 over 1 batch | 7 `IN`+`US`, 4 copy variations, unmodelled `experiment_variant` preserved, one ad with no media and no `link_description` |
+
+All ten required scenarios have a **named** test each (`test_scenario_01_image_ad` ...), so a
+fixture edit that removes one fails loudly. Scenario 10 is deliberate: the same `external_ad_id`
+served twice with different copy within one cursor walk is exactly the input the append-only
+snapshot logic needs in S2.1, and the provider returns what it saw without judging it.
+Every host is `example.invalid` (RFC 2606, cannot resolve). No real Page ID, Ad ID, or token.
+
+### MockAIProvider summary
+Keyed by `copy_hash` (the same key results are deduplicated on in storage), injected at
+construction. Three stored analyses: English (`en`, 15/16 fields, `urgency` left `null`
+because the copy claims no urgency), Hindi/Hinglish (`hi`, 14/16, analysed in Hindi with the
+English summary alongside), and a sparse case (0/16). An unknown `copy_hash` returns
+`CopyAnalysis()` -- fourteen nulls, not a generated sentence. A test asserts the field set
+contains **no** performance field (`spend`, `revenue`, `roas`, `leads`, `conversions`,
+`reach`, `impressions`, `clicks`, `ctr`, `performance`), so one cannot be added by accident.
+
+### Validation results (all re-run on the final tree)
+| Gate | Command | Result |
+|---|---|---|
+| Lock | `uv lock --check` | exit 0, 52 packages, `uv.lock` **unchanged** |
+| Lint | `uv run ruff check .` | **All checks passed** |
+| Format | `uv run ruff format --check .` | 50 files already formatted |
+| Types | `uv run mypy backend/app` | Success, no issues, 26 source files |
+| Tests | `uv run pytest -q` | **287 passed** (was 56 in S0.2) |
+| Tests, no Docker | `uv run pytest -q -m "not integration"` | 281 passed, 6 deselected |
+| Compose | `docker compose config -q` | exit 0 |
+| Migrations | `uv run alembic heads` | `0001_pg_trgm (head)`, single head, no new file |
+
+New S0.3 tests: **231** (287 total - 56 carried from S0.2). The 6 integration tests are the
+unchanged S0.2 live-PostgreSQL tests; container `metaaudit-postgres-1` healthy, PostgreSQL 16.15.
+
+### Offline / network guard
+`backend/tests/test_offline_guard.py` -- 6 tests, all pass. The `no_network` fixture replaces
+`socket.socket`, `socket.create_connection` and `socket.getaddrinfo` with functions that raise
+`AssertionError`. `test_the_guard_actually_blocks_sockets` proves the guard bites before the
+rest of the suite relies on it, then the ad provider, a full cursor walk, the AI provider and
+`LocalFsStore` all run underneath it. A static half proves there is no code to call: no module
+under `backend/app/providers/` imports `socket`, `ssl`, `http`, `httpx`, `requests`, `urllib`,
+`urllib3` or `aiohttp`, and the mocks additionally import no database and no filesystem module.
+
+### Security review (secure-code-guardian)
+- No secrets in source. Swept `providers/`, `services/` and `composition.py` for
+  `password|secret|api_key|access_token|Bearer|EAA` -- zero hits. Fixtures swept separately.
+- Provider output is treated as untrusted at the boundary: `extra="forbid"` on every contract
+  model, `http(s)`-only URLs, timezone-aware datetimes required, and an `AdFormat` a provider
+  does not use becomes `null` with the original wording preserved.
+- No shell execution anywhere: swept for `subprocess`, `os.system`, `popen`, `eval`, `exec` --
+  zero hits.
+- No string-built SQL: swept for `text(f`, `execute(f`, `.format(` -- zero hits.
+- The only new SQL-adjacent surface is the queue's configurable table name, validated as a bare
+  lowercase identifier before it can reach SQL. Tested against 9 hostile values including
+  `jobs"; DROP TABLE ad_snapshots; --`.
+- Filesystem writes go through exactly one choke point, `LocalFsStore._path_for`, which
+  validates the key as 64 lowercase hex before building a path. Traversal, absolute paths,
+  drive letters and URL-shaped keys are all refused; tested.
+- Fixture scanner rejects long numeric identifiers, non-reserved hosts, email addresses and
+  credential words, and requires every id to be namespaced `mock-*`. 26 checks across 2 files.
+- `ruff` includes `S` (bandit) and runs clean.
+
+### Findings raised and fixed DURING S0.3
+1. **The ruff `per-file-ignores` patterns never matched anything.** `"tests/**"` is matched
+   against the path from the project root, and the tests live at `backend/tests/**`, so the
+   ignore has been dead since S0.1. Corrected to `**/tests/**`. This immediately exposed a
+   now-redundant `# noqa: S106` in an S0.2 test (RUF100), which was converted to a comment
+   keeping its intent. Only that one line of S0.2 code was touched.
+2. **`N818` (exceptions should end in `Error`) conflicts with the agreed contract.** The names
+   `RateLimited`, `Blocked`, `SchemaChanged` and `Transient` are fixed by ARCHITECTURE.md and
+   appear in run records operators read. Added a scoped per-file-ignore for `errors.py` and
+   `jobs.py` with the reasoning in a comment, rather than renaming the contract. A new exception
+   anywhere else still needs an `Error` suffix.
+3. **`pytest`'s `pythonpath` does not cover a helper module beside the tests.** The shared AST
+   probe could not be imported. Added `backend/tests` to `pythonpath`.
+4. **`copy_hash` is required on `CopyAnalysisRequest` with no default.** Without it an
+   `AI_INTERPRETATION` value cannot be traced back to the snapshot it came from, which
+   AGENTS.md section 7 requires.
+5. **Self-review (thermo-nuclear) restructured `_normalise`**, which had grown to 62 lines with
+   six branches, into `_require_ad_id`, `_require_body`, `_read_media` and `_unmodelled_fields`,
+   leaving the main function as a readable field-mapping table. Two boundary tests that grepped
+   source text were replaced with exact `__module__` and AST-import checks, so reformatting a
+   class declaration can no longer make them pass for the wrong reason.
+
+### Known limitations
+- **`PostgresJobQueue` cannot enqueue, claim, complete or fail anything.** It is a declared,
+  fail-closed seam. S1.2 creates the table and implements it. This is deliberate, not an
+  oversight, and it is the single weakest part of the checkpoint.
+- **No real provider exists.** `MockProvider` is the only registered `AdDataProvider`. The S4
+  data-access question (Apify vs manual import vs nothing) is unchanged and still open.
+- **No AI model is configured and no SDK is installed.** `MockAIProvider` is the only
+  `AIProvider`. Real adapters land in S3.
+- **No media bytes are ever fetched or persisted by the application.** `LocalFsStore` can store
+  and read bytes a caller hands it; nothing in `backend/app` calls it yet.
+- **The `no_network` guard is opt-in, not autouse.** It has to be: the `integration` tests
+  genuinely open a socket to the local PostgreSQL container, and a guard that blocked them
+  would be a guard nobody could trust. Any future test that should be offline must request the
+  fixture explicitly.
+- **The AST boundary tests cover imports, not behaviour.** A provider that reached the database
+  through some non-import route would pass them. The realistic route is an import.
+- STILL OPEN from the S0.1 review: `backend/app/main.py` serves `/docs`, `/docs/oauth2-redirect`
+  and `/openapi.json` unauthenticated. Still deliberately unchanged -- S0.1 code, and out of
+  scope for S0.3. Three unauthenticated routes remain. Gating them is a 3-line change whenever
+  approved.
+- `alembic downgrade` is still never executed. It issues a `DROP`; the checkpoint rules forbid
+  running a destructive command without explicit approval.
+- `mypy` still covers `backend/app` only, not `backend/tests`. The S0.3 tests are therefore
+  untyped-checked. Widening the scope would surface pydantic-settings' `_env_file` and other
+  false positives, as recorded in S0.2.
+- `.ruff_cache` writes still fail with os error 5; gitignored, no repo impact.
+- The repo-local git identity is STILL the placeholder `Brandset Dev <dev@brandset.local>`.
+- No remote configured. Nothing pushed.
+
+### Next checkpoint: S1
+`IMPLEMENTATION_PLAN.md` still carries the superseded S0-S8 milestone table; S0-S3 is the
+authoritative structure (AGENTS.md section 1). S1.1 is the schema for slice 1: `users`,
+`settings`, `audit_logs`, `competitors`, `facebook_pages`, `collection_runs`, `provider_runs`,
+`raw_responses`, `ads`, `ad_snapshots`, `ad_creatives`, `media_assets`, `ad_platforms`,
+`ad_countries`, `landing_pages` -- with the first real Alembic migration beyond `pg_trgm`, and
+the search indexes (`tsvector` + `pg_trgm` GIN) that the extension was migrated for.
+S1.2 is collection orchestration, which is where `PostgresJobQueue` becomes real.
+
+NOT started. Requires explicit human approval.
+
+### Git
+Committed as `feat: establish provider and service contracts`. No remote added, nothing pushed.

@@ -1,0 +1,60 @@
+{
+  "analysis_version": "mock-v1",
+  "description": "Stored analyses for the MockAIProvider, keyed by copy_hash. Invented copy and invented interpretations; no real advertiser, no model output, no performance claim of any kind.",
+  "responses": {
+    "mock-copy-hash-en-001": {
+      "hook": "Opens by naming a failure the reader has already had: a kettle that stops whistling.",
+      "problem": "Kettles that fail within a year, leaving the reader with an appliance that looks fine and silently does not.",
+      "promise": "A kettle still in working order after years of daily use.",
+      "offer": "A 5,000 boil-cycle test claim, with the test log published rather than summarised.",
+      "cta": "Shop now",
+      "persona": "Household buyers who have replaced the same small appliance before.",
+      "pain_point": "Cheap goods that fail quietly, with no way to check.",
+      "angle": "Specificity as proof: a large number plus a published method, instead of a quality adjective.",
+      "proof": "A stated cycle count and a published test log, linked from the ad itself.",
+      "urgency": null,
+      "awareness_level": "Problem-aware. The reader knows the category and the failure mode; the ad does not need to explain either.",
+      "funnel_stage": "Consideration. It supplies evidence for a purchase already being weighed up.",
+      "copy_structure": "Open on the familiar failure, name the specific number, offer the log as proof, close on a purchase action.",
+      "why_it_may_work": "It replaces an unverifiable quality claim with a number and a method a reader could check, which suits readers who are already tired of unverifiable quality claims. Whether it does is not something the copy itself can show.",
+      "language": "en",
+      "confidence": "high"
+    },
+    "mock-copy-hash-hi-001": {
+      "hook": "Names the three plants in the headline itself, before any body copy runs.",
+      "problem": "Ayurvedic products whose ingredient lists are hard to find, buried on a back label.",
+      "promise": "The ingredients are stated up front, on the front of the pack.",
+      "offer": null,
+      "cta": "Order now",
+      "persona": "Readers who buy herbal products and have wanted to see the full ingredient list before ordering.",
+      "pain_point": "Ingredient lists that are present but effectively hidden.",
+      "angle": "Disclosure as the product claim: the thing competitors treat as a legal detail is made the headline.",
+      "proof": "The ad states the list is printed on the front of the pack.",
+      "urgency": null,
+      "awareness_level": "Product-aware. The reader knows what haritaki or ashwagandha is; the ad is not teaching the category.",
+      "funnel_stage": "Consideration, leaning to purchase. The reader has a product in mind and is deciding between brands.",
+      "copy_structure": "Ingredients listed as a headline, the disclosure decision explained in the body, an action to close.",
+      "why_it_may_work": "Leading with the disclosure rather than a benefit claim reads as the opposite of the category's habit, and that contrast may be what a reader who has been disappointed by that habit notices. It is a reading of the wording, not an observation about what the ad achieved.",
+      "language": "hi",
+      "confidence": "medium"
+    },
+    "mock-copy-hash-sparse-001": {
+      "hook": null,
+      "problem": null,
+      "promise": null,
+      "offer": null,
+      "cta": null,
+      "persona": null,
+      "pain_point": null,
+      "angle": null,
+      "proof": null,
+      "urgency": null,
+      "awareness_level": null,
+      "funnel_stage": null,
+      "copy_structure": null,
+      "why_it_may_work": null,
+      "language": null,
+      "confidence": null
+    }
+  }
+}

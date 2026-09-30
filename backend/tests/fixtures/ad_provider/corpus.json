@@ -1,0 +1,342 @@
+{
+  "provider": "mock",
+  "description": "Synthetic ad corpus for the MockProvider. Every id, name, brand and URL here is invented. Hosts use the reserved .invalid TLD (RFC 2606) so a fixture can never resolve to a real service.",
+  "pages": [
+    {
+      "page": {
+        "provider_page_id": "mock-page-0001",
+        "page_name": "Aurora Kitchen Studio",
+        "url": "https://aurora.example.invalid/"
+      },
+      "batches": [
+        {
+          "next_cursor": "mock-cursor-0001-a",
+          "raw": {
+            "ads": [
+              {
+                "ad_id": "mock-ad-000101",
+                "page_id": "mock-page-0001",
+                "page_name": "Aurora Kitchen Studio",
+                "platforms": ["facebook", "instagram"],
+                "targeted_countries": ["IN"],
+                "status": "active",
+                "ad_delivery_start_time": "2026-08-12T09:30:00+05:30",
+                "format": "IMAGE",
+                "experiment_variant": "a",
+                "ad_creative_bodies": [
+                  {
+                    "title": "A kettle that actually whistles",
+                    "body": "Most kettes go quiet in a year. Ours is tested to 5,000 boil cycles and we publish the test log.",
+                    "link_title": "See the cycle test",
+                    "link_description": "Full test log and warranty, published on the product page.",
+                    "call_to_action": {"type": "SHOP_NOW"},
+                    "link_url": "https://aurora.example.invalid/kettle/cycle-test",
+                    "media": [
+                      {
+                        "key": "mock-media-0001-a",
+                        "url": "https://cdn.example.invalid/p/kettle-front.png",
+                        "width": 1080,
+                        "height": 1080,
+                        "mime": "image/png",
+                        "duration_seconds": null
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "ad_id": "mock-ad-000102",
+                "page_id": "mock-page-0001",
+                "page_name": "Aurora Kitchen Studio",
+                "platforms": ["facebook", "instagram", "messenger"],
+                "targeted_countries": ["IN"],
+                "status": "active",
+                "ad_delivery_start_time": "2026-08-15T18:00:00+05:30",
+                "format": "VIDEO",
+                "experiment_variant": "a",
+                "ad_creative_bodies": [
+                  {
+                    "title": "Six months of mornings, in ninety seconds",
+                    "body": "No voiceover. Just the sound the lid makes at 6am, on repeat, until you want it back.",
+                    "link_description": "Filmed over six months in one kitchen.",
+                    "call_to_action": {"type": "WATCH_MORE"},
+                    "link_url": "https://aurora.example.invalid/watch/mornings",
+                    "media": [
+                      {
+                        "key": "mock-media-0002-a",
+                        "url": "https://cdn.example.invalid/v/mornings.mp4",
+                        "width": 1080,
+                        "height": 1920,
+                        "mime": "video/mp4",
+                        "duration_seconds": 91.4
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "next_cursor": "mock-cursor-0001-b",
+          "raw": {
+            "ads": [
+              {
+                "ad_id": "mock-ad-000103",
+                "page_id": "mock-page-0001",
+                "page_name": "Aurora Kitchen Studio",
+                "platforms": ["facebook", "instagram"],
+                "targeted_countries": ["IN", "GB"],
+                "status": "active",
+                "ad_delivery_start_time": "2026-08-20T11:15:00+05:30",
+                "format": "CAROUSEL",
+                "ad_creative_bodies": [
+                  {
+                    "title": "Three ways to brew, one kettle",
+                    "body": "Card one is the pour-over. Card two is the pot. Card three is the one you will actually use on a Tuesday.",
+                    "link_description": "Swipe for all three, then pick the Tuesday option.",
+                    "call_to_action": {"type": "LEARN_MORE"},
+                    "link_url": "https://aurora.example.invalid/three-ways",
+                    "media": [
+                      {
+                        "key": "mock-media-0003-a",
+                        "url": "https://cdn.example.invalid/p/pourover.jpg",
+                        "width": 1080,
+                        "height": 1080,
+                        "mime": "image/jpeg",
+                        "duration_seconds": null
+                      },
+                      {
+                        "key": "mock-media-0003-b",
+                        "url": "https://cdn.example.invalid/p/pot.jpg",
+                        "width": 1080,
+                        "height": 1080,
+                        "mime": "image/jpeg",
+                        "duration_seconds": null
+                      },
+                      {
+                        "key": "mock-media-0003-c",
+                        "url": "https://cdn.example.invalid/p/tuesday.jpg",
+                        "width": 1080,
+                        "height": 1080,
+                        "mime": "image/jpeg",
+                        "duration_seconds": null
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "next_cursor": null,
+          "raw": {
+            "ads": [
+              {
+                "ad_id": "mock-ad-000101",
+                "page_id": "mock-page-0001",
+                "page_name": "Aurora Kitchen Studio",
+                "platforms": ["facebook", "instagram"],
+                "targeted_countries": ["IN"],
+                "status": "active",
+                "ad_delivery_start_time": "2026-08-12T09:30:00+05:30",
+                "format": "IMAGE",
+                "experiment_variant": "b",
+                "ad_creative_bodies": [
+                  {
+                    "title": "Still whistling after 5,000 boils",
+                    "body": "Same kettle, new claim. The cycle test is now on the box, not just the site.",
+                    "link_title": "Read the box copy",
+                    "link_description": "Packaging claim, unchanged test method.",
+                    "call_to_action": {"type": "SHOP_NOW"},
+                    "link_url": "https://aurora.example.invalid/kettle/box-copy",
+                    "media": [
+                      {
+                        "key": "mock-media-0001-b",
+                        "url": "https://cdn.example.invalid/p/kettle-box.png",
+                        "width": 1080,
+                        "height": 1080,
+                        "mime": "image/png",
+                        "duration_seconds": null
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "page": {
+        "provider_page_id": "mock-page-0002",
+        "page_name": "Northwind Fitness Club",
+        "url": "https://northwind.example.invalid/"
+      },
+      "batches": [
+        {
+          "next_cursor": "mock-cursor-0002-a",
+          "raw": {
+            "ads": [
+              {
+                "ad_id": "mock-ad-000201",
+                "page_id": "mock-page-0002",
+                "page_name": "Northwind Fitness Club",
+                "platforms": ["facebook", "audience_network"],
+                "targeted_countries": ["GB"],
+                "status": "active",
+                "ad_delivery_start_time": "2026-08-05T07:00:00+01:00",
+                "format": "IMAGE",
+                "ad_creative_bodies": [
+                  {
+                    "title": "Nobody joins a gym on a Monday",
+                    "body": "So we stopped advertising January. Membership is open all year, which is the whole pitch.",
+                    "link_description": "Rolling membership, no January spike.",
+                    "call_to_action": {"type": "SIGN_UP"},
+                    "link_url": "https://northwind.example.invalid/join/rolling",
+                    "media": [
+                      {
+                        "key": "mock-media-shared-01",
+                        "url": "https://cdn.example.invalid/p/empty-gym.png",
+                        "width": 1200,
+                        "height": 628,
+                        "mime": "image/png",
+                        "duration_seconds": null
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "ad_id": "mock-ad-000202",
+                "page_id": "mock-page-0002",
+                "page_name": "Northwind Fitness Club",
+                "platforms": ["facebook", "audience_network", "instagram"],
+                "targeted_countries": ["GB", "IE"],
+                "status": "active",
+                "ad_delivery_start_time": "2026-08-09T12:45:00+01:00",
+                "format": "VIDEO",
+                "ad_creative_bodies": [
+                  {
+                    "title": "Same photo, two other sentences",
+                    "body": "The creative is the empty gym again. Only the caption moved, which is the cheapest thing to test.",
+                    "link_description": "One asset, two claims, two landing pages.",
+                    "call_to_action": {"type": "LEARN_MORE"},
+                    "link_url": "https://northwind.example.invalid/join/summer",
+                    "media": [
+                      {
+                        "key": "mock-media-shared-01",
+                        "url": "https://cdn.example.invalid/p/empty-gym.png",
+                        "width": 1200,
+                        "height": 628,
+                        "mime": "image/png",
+                        "duration_seconds": null
+                      },
+                      {
+                        "key": "mock-media-0004-b",
+                        "url": "https://cdn.example.invalid/v/coach.mp4",
+                        "width": 1920,
+                        "height": 1080,
+                        "mime": "video/mp4",
+                        "duration_seconds": 24.0
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "next_cursor": null,
+          "raw": {
+            "ads": [
+              {
+                "ad_id": "mock-ad-000203",
+                "page_id": "mock-page-0002",
+                "page_name": "Northwind Fitness Club",
+                "status": null,
+                "format": "DYNAMIC",
+                "ad_creative_bodies": [
+                  {
+                    "title": null,
+                    "body": null,
+                    "link_url": null,
+                    "media": []
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "page": {
+        "provider_page_id": "mock-page-0003",
+        "page_name": "Coastal Ayurveda",
+        "url": "https://coastal.example.invalid/"
+      },
+      "batches": [
+        {
+          "next_cursor": null,
+          "raw": {
+            "ads": [
+              {
+                "ad_id": "mock-ad-000301",
+                "page_id": "mock-page-0003",
+                "page_name": "Coastal Ayurveda",
+                "platforms": ["facebook", "instagram"],
+                "targeted_countries": ["IN", "US"],
+                "status": "active",
+                "ad_delivery_start_time": "2026-08-18T06:05:00Z",
+                "format": "IMAGE",
+                "ad_creative_bodies": [
+                  {
+                    "title": "Everything is mixed after you order",
+                    "body": "Not in advance, not in a warehouse. You choose the base, and the jars arrive with the batch you bought.",
+                    "link_description": "Mixed to order, shipped in 48 hours.",
+                    "call_to_action": {"type": "ORDER_NOW"},
+                    "link_url": "https://coastal.example.invalid/mixed-to-order",
+                    "media": [
+                      {
+                        "key": "mock-media-0005-a",
+                        "url": "https://cdn.example.invalid/p/jars.png",
+                        "width": 1200,
+                        "height": 1200,
+                        "mime": "image/png",
+                        "duration_seconds": null
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "ad_id": "mock-ad-000302",
+                "page_id": "mock-page-0003",
+                "page_name": "Coastal Ayurveda",
+                "platforms": ["facebook"],
+                "targeted_countries": ["IN"],
+                "status": "active",
+                "ad_delivery_start_time": "2026-08-22T20:00:00+05:30",
+                "format": "IMAGE",
+                "ad_creative_bodies": [
+                  {
+                    "title": "Haritaki, ashwagandha, neem",
+                    "body": "Teen plants, ek capsule. Aur is baar humne teenon ke naam upar likha, kyunki humein lagta hai ki naam chhupana nahi chahiye.",
+                    "link_description": "Ingredient list printed on the front, not the back.",
+                    "call_to_action": {"type": "ORDER_NOW"},
+                    "link_url": "https://coastal.example.invalid/teen-plants",
+                    "media": []
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

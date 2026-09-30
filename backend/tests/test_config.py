@@ -112,7 +112,9 @@ def test_variables_for_other_tools_are_ignored(
     make_settings: Callable[..., Settings],
 ) -> None:
     """`.env` also holds POSTGRES_* for docker compose; those are not app settings."""
-    settings = make_settings(POSTGRES_PASSWORD="not-a-real-password", POSTGRES_PORT="5432")  # noqa: S106
+    # The password is a literal on purpose -- it is a placeholder proving the
+    # variable is ignored, never a credential.
+    settings = make_settings(POSTGRES_PASSWORD="not-a-real-password", POSTGRES_PORT="5432")
     assert settings.app_env is AppEnv.LOCAL
 
 

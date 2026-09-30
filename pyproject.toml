@@ -102,8 +102,16 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["S", "T20"]
+# Patterns are matched against the path from the project root, so these need
+# the `**/` prefix to reach backend/. Plain "tests/**" never matched anything.
+"**/tests/**" = ["S", "T20"]
 "**/__init__.py" = ["F401"]
+# Provider error names are fixed by ARCHITECTURE.md and the S0.3 contract:
+# RateLimited, Blocked, SchemaChanged, Transient. They are written into run
+# records and read by operators, so they are not renamed to satisfy a lint
+# rule. A new exception outside these two modules still needs an Error suffix.
+"**/app/providers/data/errors.py" = ["N818"]
+"**/app/services/jobs.py" = ["N818"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["app"]
@@ -132,7 +140,10 @@ disallow_untyped_defs = false
 [tool.pytest.ini_options]
 minversion = "8.0"
 testpaths = ["backend/tests"]
-pythonpath = ["backend"]
+# `backend` puts the `app` package on the path. `backend/tests` puts the shared
+# test helpers (`_ast_probe`) on it too -- pytest guarantees the path for the
+# package under test, not for a helper module sitting beside the tests.
+pythonpath = ["backend", "backend/tests"]
 asyncio_mode = "auto"
 addopts = [
     "-ra",
