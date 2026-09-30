@@ -1,0 +1,44 @@
+# Local PostgreSQL 16 for development. This file runs the database and nothing
+# else. No API, worker, Redis, MinIO or frontend container is defined: none of
+# them exist yet, and an unused service in a compose file is a false promise.
+#
+#   Copy-Item .env.example .env     # then set POSTGRES_PASSWORD
+#   docker compose up -d
+#   docker compose ps               # wait for "healthy" before migrating
+#
+# Data lives in the named volume `brandset_pgdata` and nothing is bind-mounted
+# from the repository. That is deliberate: the project path contains a space,
+# and Windows bind mounts are the usual source of path-quoting breakage. Compose
+# needs no repository path at all here, so the space is a non-issue.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-brandset}
+      POSTGRES_DB: ${POSTGRES_DB:-brandset}
+      # No default value on purpose. If this is unset, compose refuses to start
+      # rather than falling back to a guessable password.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
+    ports:
+      # Host port only. Override POSTGRES_PORT if 5432 is already taken by a
+      # native PostgreSQL install; remember to change DATABASE_URL to match.
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # pg_isready against the real database, not just the port: a server can
+      # accept TCP while still initialising.
+      test:
+        - CMD-SHELL
+        - pg_isready -U ${POSTGRES_USER:-brandset} -d ${POSTGRES_DB:-brandset}
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+    # Named explicitly so the volume survives a project-directory rename.
+    name: brandset_pgdata

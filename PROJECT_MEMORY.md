@@ -120,3 +120,135 @@ during S0.1 - CHANGE THESE to a real identity before ever pushing.
 Next checkpoint: S0.2 (config + logging + SQLAlchemy base + Alembic + Postgres +
 AdDataProvider/AIProvider/MediaStore/JobQueue interfaces). NOT started. Requires explicit
 human approval.
+
+---
+
+## Checkpoint S0.2 -- Configuration + Database Foundation (COMPLETE)
+
+Approved and built. Configuration, structured logging, PostgreSQL 16 and Alembic all work.
+`pytest` no longer exits 5: the suite now has 56 tests.
+
+### Files created (17)
+
+Runtime:
+- `backend/app/core/config.py` -- `Settings` (pydantic-settings), `AppEnv`/`LogLevel`/`LogFormat`,
+  cached `get_settings()`.
+- `backend/app/core/logging.py` -- `configure_logging()`, `run_id_context()`, `get_run_id()`,
+  `StructuredFormatter`, private `_RunIdFilter`. Standard library only.
+- `backend/app/db/base.py` -- `Base(DeclarativeBase)` with the constraint naming convention.
+- `backend/app/db/session.py` -- `get_engine()`, `get_session_factory()`, `session_scope()`,
+  `get_session()` (FastAPI dependency), `dispose_engine()`, `check_database()`.
+- `docker-compose.yml` -- PostgreSQL 16 only.
+- `alembic.ini`, `database/migrations/env.py`, `database/migrations/script.py.mako`,
+  `database/migrations/versions/0001_pg_trgm.py`.
+- `scripts/check_db.py` -- read-only connectivity check.
+
+Tests:
+- `backend/tests/conftest.py`, `test_config.py`, `test_logging.py`, `test_db_base.py`,
+  `test_db_session.py`, `test_migrations.py`, `test_db_integration.py`.
+
+### Files modified (1)
+- `.env.example` -- trimmed to ONLY the 9 variables S0.2 actually introduces. The S0.1 version
+  already advertised provider, AI, media, auth and job-queue variables that no code reads yet;
+  those are removed and will return with the checkpoint that implements them. Added the
+  `POSTGRES_*` block that docker compose consumes. `.env` itself was created locally (gitignored)
+  with a random 28-character password.
+
+NOT modified: `main.py`, `AGENTS.md`, `ARCHITECTURE.md`, `DATA_ACCESS.md`,
+`IMPLEMENTATION_PLAN.md`, `REPOSITORY_RESEARCH.md`, `SETUP_WINDOWS.md`, `pyproject.toml`,
+`uv.lock`, `.gitignore`, `.gitattributes`, `README.md`.
+
+### Database setup
+- Container `metaaudit-postgres-1`, image `postgres:16-alpine`, server **PostgreSQL 16.15**,
+  status **healthy**. Named volume `brandset_pgdata`. Host port 5432.
+- No bind mounts anywhere in the compose file, so the space in `C:\Users\DELL\Downloads\Meta Audit`
+  is a non-issue for Docker. Compose derived the project name `metaaudit` from the spaced directory.
+- `POSTGRES_PASSWORD` uses `${POSTGRES_PASSWORD:?...}` -- compose REFUSES to start without it
+  rather than falling back to a guessable default. No password is hardcoded anywhere.
+
+### Migration result
+- Revision **`0001_pg_trgm`**, `down_revision = None`. Single head, no branches.
+- `alembic current` -> `0001_pg_trgm (head)`; `alembic heads` -> `0001_pg_trgm (head)`.
+- `pg_trgm` 1.6 verified installed via `pg_extension`.
+- The migration creates NO tables. S0.2 forbids domain tables, so the whole database foundation is
+  the extension: `ARCHITECTURE.md` puts ad search on `tsvector` + `pg_trgm`, and the extension must
+  exist before the first GIN trigram index in S1.1. `downgrade()` exists and drops it.
+
+### Validation results (all re-run on the final tree)
+- `uv lock --check` -> exit 0, 52 packages, `uv.lock` unchanged.
+- `uv run ruff check .` -> All checks passed, exit 0.
+- `uv run ruff format --check .` -> 25 files already formatted, exit 0.
+- `uv run mypy backend/app` -> Success, no issues in 12 source files, exit 0.
+- `uv run pytest -q` -> **56 passed**, exit 0.
+- `uv run pytest -q -m "not integration"` -> 50 passed, 6 deselected. Unit suite needs no Docker.
+- `docker compose config -q` -> exit 0. `docker compose ps` -> healthy.
+- `uv run python scripts/check_db.py` -> exit 0, emitted real JSON with a live `run_id`.
+- `alembic upgrade head` -> exit 0, idempotent on re-run.
+- `git diff --check` -> clean.
+
+### Findings raised and fixed DURING S0.2 (worth remembering)
+1. **Pydantic echoed the database password in validation errors.** `SecretStr` masked `repr()`
+   and `str()`, but a rejected DSN still printed the raw input inside the `ValidationError`,
+   which reaches startup logs and bug reports. Fixed with `hide_input_in_errors=True` in
+   `model_config`; pinned by `test_rejection_message_does_not_echo_the_password`.
+2. **pytest rebinds the streams of existing `StreamHandler`s via `setStream()`.** The original
+   logging tests monkeypatched `sys.stdout`, which pytest silently discarded -- 10 tests failed
+   for a reason that had nothing to do with the code. Fixed properly by giving
+   `configure_logging()` an explicit `stream` parameter instead of global patching.
+3. **`assert _session_factory is not None` with `# noqa: S101`** in `db/session.py` was a smell,
+   and the noqa itself would have tripped RUF100 since S101 is ignored project-wide. Removed by
+   dropping the second global entirely: the session factory is rebuilt from `get_engine()` per
+   call, so the factory can never outlive its engine.
+4. Removed the `_scheme_of()` module-level helper in favour of an inline `partition`, and removed
+   the blanket `import sqlalchemy as sa` from `script.py.mako` (it made ruff flag F401 on every
+   generated migration that did not use it).
+5. `path_separator = os` added to `alembic.ini` to clear a `DeprecationWarning` about legacy
+   path splitting.
+
+### Security review (secure-code-guardian)
+- `database_url` is a `SecretStr`; asserted absent from `repr(settings)` and `str(settings)`.
+  `.env` is gitignored (verified with `git check-ignore`); `.env.example` holds placeholders only.
+- No f-string, `%` or `.format()` SQL anywhere. Every statement is a literal passed to `text()`;
+  the one parameterised query (`pg_terminate_backend`) uses a bound `:pid` parameter.
+- `scripts/check_db.py` logs the exception TYPE only, never the message and never `exc_info`,
+  because a connection error can carry the DSN.
+- Prod safety guard refuses to start with `log_level=DEBUG` or `database_echo=true`.
+- `alembic.ini` and every migration file are asserted to contain no database URL.
+- Residual risk, not fixed: `docker compose config` prints the RESOLVED password to stdout. That
+  is inherent to compose. Do not paste its output into a bug report or a ticket.
+- Residual risk, not fixed: a SQLAlchemy driver-load failure could include the DSN in its own
+  exception text. Not reachable with psycopg installed.
+
+### Known limitations
+- **NO S0.3 CODE EXISTS.** Verified by grep: `AdDataProvider`, `AIProvider`, `MediaStore`,
+  `JobQueue`, `MockProvider`, `DataOrigin`, `EvidenceClass` and the typed provider errors have
+  zero implementations. The only textual matches are pre-existing S0.1 `__init__.py` docstrings
+  describing those boundaries.
+- `alembic downgrade` is implemented but was NEVER EXECUTED. It issues a `DROP`, and the
+  checkpoint rules forbid running a destructive command without explicit approval. Reversibility
+  is asserted structurally (`test_every_revision_is_reversible`), not by execution.
+- Integration tests are hard failures when PostgreSQL is down, never skips. A skip is
+  indistinguishable from a pass, and this project does not report unverified work as green.
+- `.env.example` deliberately carries no provider/AI/media/auth/queue variables yet.
+- `mypy` covers `backend/app` only (scope set in S0.1). Running it over `backend/tests` and
+  `scripts` surfaces 4 false positives from pydantic-settings' undocumented `_env_file` keyword
+  and SQLAlchemy's untyped `CreateTable.compile`. Not a gate; revisit if the scope is widened.
+- STILL OPEN from the S0.1 review: `backend/app/main.py` serves `/docs`, `/redoc` (via
+  `docs_url`) and `/openapi.json` unauthenticated. It was flagged to be gated on `app_env` in
+  S0.2 but was deliberately NOT changed, because S0.1 code was out of scope for this checkpoint.
+  Three unauthenticated routes remain. Gating them is a 3-line change whenever approved.
+- `.ruff_cache` writes still fail with os error 5 (ACL/AV interference); the directory is
+  gitignored, so there is no repo impact. Expect it before wiring CI.
+- `postgres:16-alpine` is pinned to the MAJOR version only. The patch is 16.15 today; a minor
+  bump will pull a new server patch. Pin the digest if reproducibility ever matters.
+- The repo-local git identity is STILL the placeholder `Brandset Dev <dev@brandset.local>`.
+  Change it before ever pushing.
+- No remote configured. Nothing pushed. Nothing merged.
+
+### Next checkpoint: S0.3
+`AdDataProvider` and `AIProvider` Protocols, `MediaStore`, `JobQueue`, the `DataOrigin` /
+`EvidenceClass` enums, the typed provider errors (`RateLimited`, `Blocked`, `SchemaChanged`,
+`Transient`), and the first-class `MockProvider` -- all with no external network access.
+NOT started. Requires explicit human approval.
+
+Also worth deciding at or before S0.3: whether to gate the FastAPI docs routes on `app_env`.
