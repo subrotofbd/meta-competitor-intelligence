@@ -753,3 +753,96 @@ No findings:
 Normalizer: parse raw provider responses into `RawAdRecord` models, validate, and persist.
 The `raw_responses` table already stores the payload; S1.3 builds the parsing layer on top.
 **Not started without explicit human approval.**
+
+---
+
+## S1.3 -- Provider Response Normalizer (NORMALIZER-ONLY)
+
+### Scope decision, as instructed
+S1.3 is **normalizer-only**. It is a pure, deterministic transformation from a provider payload to
+`RawAdRecord` values. It does not persist, does not write files, and does not touch the database.
+**Normalized ad persistence is deferred to S2.1**, which `ARCHITECTURE.md` and
+`backend/app/models/__init__.py` already assign the `ads` and `ad_snapshots` tables to. This
+checkpoint resolved the earlier blocker by narrowing itself rather than by inventing a table.
+
+### What was built
+- **`backend/app/providers/data/normalize.py`** (new) -- the single place a provider payload becomes a
+  `RawAdRecord`. Two entry points: `normalize_record` (raises) and `normalize_payload` (partial
+  success). Structured errors via `NormalizationErrorKind`, `NormalizationError`,
+  `RecordRejectedError`, `NormalizationResult`.
+- **`RawAdRecord` is reused from S0.3 unchanged.** No second competing ad record model was created.
+- **`MockProvider` now delegates to the normalizer.** The old inline adapter (`_normalise`,
+  `_require_ad_id`, `_require_body`, `_read_media`, `_unmodelled_fields`, `_as_str_tuple`,
+  `_parse_datetime`, `_MAPPED_KEYS`, `_MAPPED_BODY_KEYS`, `_CREATIVE_BODY_KEY`) was deleted, so the
+  provider-to-record mapping exists exactly once in the product. `MockProvider` keeps its
+  all-or-nothing policy by mapping the structured error onto its existing `SchemaChanged` contract.
+- **New fixture** `backend/tests/fixtures/normalizer/payloads.json`. Kept deliberately apart from the
+  `MockProvider` corpus: that corpus is a *valid* response the provider serves whole, so malformed
+  records in it would break the provider's contract on load.
+- **New conftest fixture** `normalizer_payloads`. No other S1.2 file was touched.
+
+### Behaviour worth remembering
+- Absence is never filled in. The three absences stay apart: key absent -> the field's own default
+  (`None` or `()`), key present and null -> `None`/`()`, key present and `""` -> `""`.
+- Text keeps `""` because `str | None` can represent it. A URL or a timestamp cannot, so an empty
+  string there reads as "not reported" rather than as a malformed value.
+- Timestamps keep the provider's offset. A naive timestamp is **refused**, never assumed to be UTC --
+  a guessed offset shifts a delivery start, and duration is displayed from that field.
+- URLs are kept verbatim or refused. No scheme folding, no trailing-slash repair. Refused for
+  non-http(s), for a control character (request-splitting payload), and for a missing host.
+- Copy is never rewritten, translated, transliterated or trimmed. Hindi/Hinglish survives verbatim.
+- Unmodelled provider fields are kept in `provider_metadata`, including an unrecognised `format`
+  (so a `None` never looks like "the provider reported nothing"). On a record/body key collision the
+  **record-level key wins**, which is a decision now documented rather than accidental.
+- Duplicate ad ids are **preserved, not merged** -- two readings of one ad are two observations.
+- No hash was invented. `raw_responses.payload_hash` is untouched and is not any kind of ad hash.
+
+### Validation completed
+- `ruff check .` clean; `ruff format --check .` clean; `mypy backend/app` clean (32 files).
+- Tests: **unit 129**, **contract 52**, **integration 96**, **full suite 450 passed**. All prior
+  S0/S1 tests still pass; none was weakened or deleted.
+- `alembic current` = `0003_jobs_table (head)`; `alembic heads` = `0003_jobs_table (head)`;
+  `alembic check` = *No new upgrade operations detected*. PostgreSQL 16 healthy.
+- **No migration, no table, no schema modification.** `git status` for `database/`,
+  `backend/app/models/`, `alembic/env.py` and `backend/app/db/` is all empty.
+
+### Reviews run
+- **thermo-nuclear-code-quality-review** -- confirmed the mapping now exists exactly once and that no
+  old helper was left orphaned. Findings fixed: dead/tautological immutability tests replaced with
+  real properties; payload tests now driven by the fixture; `MALFORMED_PAYLOAD` docstring corrected
+  (kind does not carry scope, `index` does, and that is now pinned by a test); the module docstring
+  no longer claims a raw-persist order the live call path does not have.
+- **secure-code-guardian** -- found four exploitable-today defects, all fixed: `str()` coercion of
+  arbitrary list elements was turning a dict into an observed platform label; provider text could
+  forge a log record through `detail` (now `_safe`: `repr`, control characters escaped, length
+  bounded); `bool` was accepted as a pixel dimension; a CRLF-bearing URL was stored. Not adopted,
+  correctly out of scope: an SSRF blocklist, which belongs at the fetch seam, and unbounded-list
+  caps, which would mean inventing limits.
+- **accidental-data-loss-prevention** -- PASS. No migration, model, or DB-config change. The
+  pre-existing normalise-before-persist ordering was **preserved, not changed**.
+
+### Known limitations
+- **Normalization still runs inside the provider.** `MockProvider` calls the normalizer in
+  `fetch_page_ads`, so a record it cannot read raises `SchemaChanged` *before*
+  `CollectionOrchestrator` persists the raw response, and the payload is lost with the exception.
+  This contradicts the intended collect -> keep raw -> normalize order and is a real data-loss path.
+  **It belongs to S2.1**, which owns persistence order. The normalizer is deliberately a pure
+  function so S2.1 can call it on an already-stored payload and get the same answer. Not fixed here
+  because doing so would mean moving the call in the S1.2 orchestrator, which is out of scope. Note
+  the exposure is slightly *higher* than before, because the reader is now stricter.
+- **No normalized ad is persisted anywhere yet.** By design; S2.1.
+- **No real provider exists.** `MockProvider` is still the only registered `AdDataProvider`.
+- **No snapshot state machine.** S2.1 owns `ad_snapshots`, `not_seen_since`, `presumed_inactive`.
+- **No API endpoints, no authentication, no frontend.** Later checkpoints.
+- **URL acceptance is not fetch safety.** Loopback, link-local and cloud-metadata addresses are
+  recorded; whether a URL may be *requested* is a decision for whoever requests it.
+- **`alembic downgrade` never executed** -- issues `DROP`s requiring explicit consent.
+- **`docker compose config` prints the resolved password** -- never paste its output.
+- **Repo-local git identity is still the placeholder** `Brandset Dev <dev@brandset.local>`.
+  No remote configured. Nothing pushed.
+
+### Next checkpoint: S2.1
+Normalized ad persistence plus the historical ad/snapshot domain: the `ads` and `ad_snapshots`
+tables, append-only `ad_snapshots`, the `provider_active` / `not_seen_since` / `presumed_inactive`
+state machine, and **reordering the collection flow so the raw response is persisted before
+normalization**. Do not start without explicit human approval.

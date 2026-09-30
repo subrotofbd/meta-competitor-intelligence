@@ -166,6 +166,19 @@ def mock_pages() -> dict[str, MockPage]:
 
 
 @pytest.fixture
+def normalizer_payloads() -> dict[str, Any]:
+    """The normalizer's edge-case corpus: readable records, and records that
+    are deliberately not readable.
+
+    Kept apart from the `MockProvider` corpus on purpose. That corpus is a
+    *valid* provider response which a provider is expected to serve whole, so
+    the malformed records a normalizer has to reject have no place in it -- they
+    would make the provider's all-or-nothing contract fail on load.
+    """
+    return _read_fixture("normalizer", "payloads.json")
+
+
+@pytest.fixture
 def mock_analyses() -> dict[str, CopyAnalysis]:
     """Stored `CopyAnalysis` values, keyed by `copy_hash`."""
     return {

@@ -11,11 +11,16 @@ rather than on fragments of one.
 
 ## What it actually does
 
-The corpus is injected at construction. Each record is stored twice: as the
-`raw` dict the provider "received", and as the normalised `RawAdRecord` its
-adapter would produce. `_normalise` is the real parsing step, so the pair stays
-honest -- `records` is a reading of `raw`, and a payload the parser cannot
-read raises `SchemaChanged` rather than yielding a half-filled record.
+The corpus is injected at construction, and each record is stored twice: as the
+`raw` dict the provider "received", and as the normalised `RawAdRecord`. The
+reading of the first into the second is `app.providers.data.normalize`, so the
+field mapping exists once for the whole product rather than once per provider.
+
+The provider's own policy is all-or-nothing: a batch containing a record it
+cannot read raises `SchemaChanged` rather than returning a partial page, because
+a silently shortened page is indistinguishable from a page that genuinely held
+fewer ads. Callers that would rather keep the good records and be told about
+the bad one call `normalize_payload` directly.
 
 ## What it refuses to do
 
@@ -30,14 +35,12 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any, Final
+from typing import Final
 
 from app.providers.data.errors import SchemaChanged
 from app.providers.data.models import (
-    AdFormat,
     CanaryResult,
     CostEstimate,
-    MediaRef,
     PageRef,
     ProviderCapabilities,
     ProviderResult,
@@ -45,42 +48,8 @@ from app.providers.data.models import (
     RawPayload,
     RequestMeta,
 )
+from app.providers.data.normalize import normalize_payload
 from app.providers.data.provenance import DataOrigin
-
-#: Every raw key `_normalise` reads. Anything else survives untouched in
-#: `provider_metadata`, so a field this product has not modelled yet is still
-#: available when someone models it.
-_MAPPED_KEYS: Final = frozenset(
-    {
-        "ad_id",
-        "ad_creative_bodies",
-        "ad_delivery_start_time",
-        "format",
-        "page_id",
-        "page_name",
-        "platforms",
-        "status",
-        "targeted_countries",
-    }
-)
-
-#: The same, one level down, inside a creative body. A body has more text slots
-#: than `RawAdRecord` models -- the link card's own title has nowhere to go --
-#: and the leftovers are kept rather than dropped.
-_MAPPED_BODY_KEYS: Final = frozenset(
-    {
-        "body",
-        "call_to_action",
-        "link_description",
-        "link_url",
-        "media",
-        "title",
-    }
-)
-
-#: The only creative shape a record can carry. A carousel is one body holding
-#: several media entries, which is how a real feed models it too.
-_CREATIVE_BODY_KEY: Final = "ad_creative_bodies"
 
 MOCK_CAPABILITIES: Final = ProviderCapabilities(
     countries=("IN", "GB", "US"),
@@ -123,128 +92,6 @@ class MockPage:
 
     page: PageRef
     batches: tuple[MockBatch, ...]
-
-
-def _as_str_tuple(value: Any) -> tuple[str, ...]:
-    """Read a provider's list of strings without inventing an entry for `None`."""
-    if not value:
-        return ()
-    return tuple(str(item) for item in value)
-
-
-def _parse_datetime(value: Any) -> datetime | None:
-    """Parse a provider timestamp, keeping `None` as `None`.
-
-    A naive datetime is left for the schema to reject: silently assuming a
-    timezone is how a delivery start drifts by a day.
-    """
-    if value is None:
-        return None
-    return datetime.fromisoformat(str(value))
-
-
-def _require_ad_id(raw: Mapping[str, Any]) -> str:
-    """The one field a record cannot be tracked without."""
-    ad_id = raw.get("ad_id")
-    if not isinstance(ad_id, str) or not ad_id:
-        raise SchemaChanged(
-            "provider record has no usable ad_id",
-            provider="mock",
-            expected="ad_id: non-empty string",
-            found=f"ad_id={ad_id!r}",
-        )
-    return ad_id
-
-
-def _require_body(raw: Mapping[str, Any]) -> Mapping[str, Any]:
-    """The creative body, which every record in this corpus carries exactly one of.
-
-    A carousel is one body holding several media entries, not several bodies,
-    which is how a real feed reports it and how `RawAdRecord` models it.
-    """
-    bodies = raw.get(_CREATIVE_BODY_KEY) or []
-    if not isinstance(bodies, list) or not bodies:
-        raise SchemaChanged(
-            "provider record has no creative body",
-            provider="mock",
-            expected=f"{_CREATIVE_BODY_KEY}: non-empty list",
-            found=f"{_CREATIVE_BODY_KEY}={bodies!r}",
-        )
-    body: Mapping[str, Any] = bodies[0]
-    return body
-
-
-def _read_media(body: Mapping[str, Any]) -> tuple[MediaRef, ...]:
-    """Every asset the body references. An empty body yields none, not a guess."""
-    return tuple(
-        MediaRef(
-            provider_key=str(entry.get("key")),
-            source_url=entry.get("url"),
-            mime=entry.get("mime"),
-            width=entry.get("width"),
-            height=entry.get("height"),
-            duration_seconds=entry.get("duration_seconds"),
-        )
-        for entry in (body.get("media") or [])
-    )
-
-
-def _unmodelled_fields(
-    raw: Mapping[str, Any],
-    body: Mapping[str, Any],
-    format_value: Any,
-    display_format: AdFormat | None,
-) -> dict[str, Any]:
-    """Everything the provider sent that this product does not model.
-
-    Collected rather than dropped, so a field nobody modelled today is still
-    there when someone does. The unrecognised creative format is included: it
-    was read, just not understood, and losing it would make `None` look like a
-    provider that said nothing.
-    """
-    fields: dict[str, Any] = {key: value for key, value in raw.items() if key not in _MAPPED_KEYS}
-    fields.update((key, value) for key, value in body.items() if key not in _MAPPED_BODY_KEYS)
-    if format_value is not None and display_format is None:
-        fields["format"] = format_value
-    return fields
-
-
-def _normalise(raw: Mapping[str, Any]) -> RawAdRecord:
-    """Read one provider record into a `RawAdRecord`.
-
-    Raises:
-        SchemaChanged: A field this adapter depends on is missing or the wrong
-            shape. Stopping is the point -- filling a required field with a
-            guess would put invented data into the store as observed data.
-    """
-    ad_id = _require_ad_id(raw)
-    body = _require_body(raw)
-
-    format_value = raw.get("format")
-    try:
-        display_format = AdFormat(format_value) if format_value is not None else None
-    except ValueError:
-        display_format = None
-
-    call_to_action = body.get("call_to_action") or {}
-
-    return RawAdRecord(
-        external_ad_id=ad_id,
-        page_id=raw.get("page_id"),
-        page_name=raw.get("page_name"),
-        platforms=_as_str_tuple(raw.get("platforms")),
-        countries=_as_str_tuple(raw.get("targeted_countries")),
-        ad_status=raw.get("status"),
-        meta_delivery_start=_parse_datetime(raw.get("ad_delivery_start_time")),
-        primary_text=body.get("body"),
-        headline=body.get("title"),
-        description=body.get("link_description"),
-        cta=call_to_action.get("type"),
-        destination_url=body.get("link_url"),
-        media=_read_media(body),
-        display_format=display_format,
-        provider_metadata=_unmodelled_fields(raw, body, format_value, display_format),
-    )
 
 
 class MockProvider:
@@ -296,14 +143,13 @@ class MockProvider:
         fixture = self._pages.get(page.provider_page_id)
         batch = None if fixture is None else _batch_at(fixture, cursor)
 
-        records: tuple[RawAdRecord, ...] = ()
         raw: RawPayload = {"ads": []}
+        records: tuple[RawAdRecord, ...] = ()
         next_cursor: str | None = None
         if batch is not None:
             raw = batch.raw
-            ads = batch.raw.get("ads", []) if isinstance(batch.raw, Mapping) else []
-            records = tuple(_normalise(ad) for ad in ads)
             next_cursor = batch.next_cursor
+            records = self._read_all(raw)
 
         return ProviderResult(
             raw=raw,
@@ -319,6 +165,25 @@ class MockProvider:
             ),
             cost_estimate=self._cost_estimate,
         )
+
+    def _read_all(self, raw: RawPayload) -> tuple[RawAdRecord, ...]:
+        """Normalise a whole batch, or refuse the batch.
+
+        `normalize_payload` is partial by design, which is right for a caller
+        that wants the good records. This provider is all-or-nothing instead: a
+        page returned short would be indistinguishable from a page that really
+        held fewer ads, so the first failure stops the batch and is reported.
+        """
+        result = normalize_payload(raw)
+        if result.errors:
+            first = result.errors[0]
+            raise SchemaChanged(
+                f"provider record at index {first.index} could not be read",
+                provider=self.name,
+                expected=f"{first.field}: a value this provider can normalize",
+                found=f"{first.field}: {first.detail}",
+            )
+        return result.records
 
     def canary(self) -> CanaryResult:
         """Answer without touching anything.

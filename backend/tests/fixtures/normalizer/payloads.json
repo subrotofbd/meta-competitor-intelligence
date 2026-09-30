@@ -1,0 +1,363 @@
+{
+  "description": "Synthetic provider payloads for the response normalizer. Every id, name, brand and URL here is invented, and hosts use the reserved .invalid TLD (RFC 2606) so a fixture can never resolve to a real service. Nothing here reports spend, reach, leads, sales, ROAS or conversions: those figures are not public for commercial ads and no fixture may imply otherwise.",
+  "records": {
+    "complete": {
+      "ad_id": "mock-ad-000401",
+      "page_id": "mock-page-0004",
+      "page_name": "Harbourline Optics",
+      "platforms": ["facebook", "instagram"],
+      "targeted_countries": ["IN", "GB"],
+      "status": "active",
+      "ad_delivery_start_time": "2026-07-02T11:15:00+05:30",
+      "format": "VIDEO",
+      "ad_creative_bodies": [
+        {
+          "title": "Reading glasses that survive a rickshaw commute",
+          "body": "Anti-glare coating rated for 40,000 wipes. Fit over the frame you already own.",
+          "link_title": "See the coating test",
+          "link_description": "Full abrasion test and two-year warranty, published on the product page.",
+          "call_to_action": {"type": "SHOP_NOW"},
+          "link_url": "https://harbourline.example.invalid/optics/coating-test",
+          "media": [
+            {
+              "key": "mock-media-0401-a",
+              "url": "https://cdn.example.invalid/p/harbourline-reel.mp4",
+              "mime": "video/mp4",
+              "width": 1080,
+              "height": 1920,
+              "duration_seconds": 27.5
+            },
+            {
+              "key": "mock-media-0401-b",
+              "url": "https://cdn.example.invalid/p/harbourline-still.jpg",
+              "mime": "image/jpeg",
+              "width": 1080,
+              "height": 1080
+            }
+          ]
+        }
+      ]
+    },
+    "sparse": {
+      "ad_id": "mock-ad-000402",
+      "ad_creative_bodies": [
+        {
+          "body": "One line of copy and nothing else was reported."
+        }
+      ]
+    },
+    "explicit_nulls": {
+      "ad_id": "mock-ad-000403",
+      "page_id": null,
+      "page_name": null,
+      "platforms": null,
+      "targeted_countries": null,
+      "status": null,
+      "ad_delivery_start_time": null,
+      "format": null,
+      "ad_creative_bodies": [
+        {
+          "title": null,
+          "body": null,
+          "link_description": null,
+          "call_to_action": null,
+          "link_url": null,
+          "media": null
+        }
+      ]
+    },
+    "empty_values": {
+      "ad_id": "mock-ad-000404",
+      "page_id": "",
+      "page_name": "",
+      "platforms": [],
+      "targeted_countries": [],
+      "status": "",
+      "ad_creative_bodies": [
+        {
+          "title": "",
+          "body": "",
+          "link_description": "",
+          "link_url": "",
+          "media": []
+        }
+      ]
+    },
+    "hinglish": {
+      "ad_id": "mock-ad-000405",
+      "page_id": "mock-page-0004",
+      "page_name": "Coastal Ayurveda",
+      "platforms": ["facebook"],
+      "targeted_countries": ["IN"],
+      "status": "active",
+      "ad_delivery_start_time": "2026-08-21T19:40:00+05:30",
+      "format": "IMAGE",
+      "ad_creative_bodies": [
+        {
+          "title": "हर सुबह तीन मिनट",
+          "body": "एक कैप्सूल, तीन मिनट — बस इतना। आयुर्वेदिक चूर्ण, कोई रसायन नहीं। आज ही ऑर्डर करें।",
+          "link_description": "पूरी सामग्री सूची यहाँ देखें — तुलना, सच्चाई के साथ।",
+          "call_to_action": {"type": "SHOP_NOW"},
+          "link_url": "https://coastal.example.invalid/ayurveda/ingredients"
+        }
+      ]
+    },
+    "unknown_fields": {
+      "ad_id": "mock-ad-000406",
+      "page_id": "mock-page-0004",
+      "status": "active",
+      "format": "CATALOG_CAROUSEL_LIKE",
+      "auction_type": "AUCTION",
+      "ad_creative_bodies": [
+        {
+          "body": "A body whose provider keys we do not model yet.",
+          "link_title": "Unmodelled body key",
+          "link_carousel_cards": [
+            {"title": "Card one", "url": "https://coastal.example.invalid/cards/one"}
+          ]
+        }
+      ]
+    },
+    "rejected": {
+      "missing_ad_id": {
+        "ad": {
+          "page_id": "mock-page-0004",
+          "ad_creative_bodies": [{"body": "No identifier was reported."}]
+        },
+        "kind": "missing_identity",
+        "field": "ad_id"
+      },
+      "blank_ad_id": {
+        "ad": {
+          "ad_id": "   ",
+          "ad_creative_bodies": [{"body": "An identifier of whitespace only."}]
+        },
+        "kind": "missing_identity",
+        "field": "ad_id"
+      },
+      "non_string_ad_id": {
+        "ad": {
+          "ad_id": 7000001,
+          "ad_creative_bodies": [{"body": "A numeric identifier, which a real feed does not send."}]
+        },
+        "kind": "missing_identity",
+        "field": "ad_id"
+      },
+      "missing_body": {
+        "ad": {"ad_id": "mock-ad-000407", "page_id": "mock-page-0004"},
+        "kind": "malformed_payload",
+        "field": "ad_creative_bodies"
+      },
+      "empty_body_list": {
+        "ad": {"ad_id": "mock-ad-000408", "ad_creative_bodies": []},
+        "kind": "malformed_payload",
+        "field": "ad_creative_bodies"
+      },
+      "body_not_an_object": {
+        "ad": {"ad_id": "mock-ad-000409", "ad_creative_bodies": ["a bare string"]},
+        "kind": "malformed_payload",
+        "field": "ad_creative_bodies"
+      },
+      "platforms_not_a_list": {
+        "ad": {
+          "ad_id": "mock-ad-000410",
+          "platforms": "facebook",
+          "ad_creative_bodies": [{"body": "A bare string where a list belongs."}]
+        },
+        "kind": "invalid_type",
+        "field": "platforms"
+      },
+      "platform_item_not_a_string": {
+        "ad": {
+          "ad_id": "mock-ad-000422",
+          "platforms": [{"name": "facebook"}, 7, null],
+          "ad_creative_bodies": [{"body": "Objects and numbers are not platform names."}]
+        },
+        "kind": "invalid_type",
+        "field": "platforms[0]"
+      },
+      "padded_ad_id": {
+        "ad": {
+          "ad_id": " mock-ad-000423 ",
+          "ad_creative_bodies": [{"body": "An identifier with padding, which would be a second history row for one ad."}]
+        },
+        "kind": "missing_identity",
+        "field": "ad_id"
+      },
+      "media_width_not_a_number": {
+        "ad": {
+          "ad_id": "mock-ad-000424",
+          "ad_creative_bodies": [
+            {"body": "Copy.", "media": [{"key": "mock-media-0424-a", "width": "1080"}]}
+          ]
+        },
+        "kind": "invalid_type",
+        "field": "width"
+      },
+      "media_height_is_a_boolean": {
+        "ad": {
+          "ad_id": "mock-ad-000425",
+          "ad_creative_bodies": [
+            {"body": "Copy.", "media": [{"key": "mock-media-0425-a", "height": true}]}
+          ]
+        },
+        "kind": "invalid_type",
+        "field": "height"
+      },
+      "media_mime_not_a_string": {
+        "ad": {
+          "ad_id": "mock-ad-000426",
+          "ad_creative_bodies": [
+            {"body": "Copy.", "media": [{"key": "mock-media-0426-a", "mime": ["image"]}]}
+          ]
+        },
+        "kind": "invalid_type",
+        "field": "mime"
+      },
+      "url_with_a_newline": {
+        "ad": {
+          "ad_id": "mock-ad-000427",
+          "ad_creative_bodies": [
+            {"body": "Copy.", "link_url": "https://harbourline.example.invalid/offer\r\nX-Injected: 1"}
+          ]
+        },
+        "kind": "invalid_url",
+        "field": "link_url"
+      },
+      "body_that_forges_a_log_line": {
+        "ad": {
+          "ad_id": "mock-ad-000429",
+          "ad_creative_bodies": ["a body, followed by a forged log line\n[INFO] collection finished"]
+        },
+        "kind": "malformed_payload",
+        "field": "ad_creative_bodies"
+      },
+      "primary_text_not_text": {
+        "ad": {
+          "ad_id": "mock-ad-000411",
+          "ad_creative_bodies": [{"body": {"text": "a nested object where copy belongs"}}]
+        },
+        "kind": "invalid_type",
+        "field": "body"
+      },
+      "call_to_action_not_an_object": {
+        "ad": {
+          "ad_id": "mock-ad-000412",
+          "ad_creative_bodies": [{"body": "Copy.", "call_to_action": "SHOP_NOW"}]
+        },
+        "kind": "invalid_type",
+        "field": "call_to_action"
+      },
+      "media_not_a_list": {
+        "ad": {
+          "ad_id": "mock-ad-000413",
+          "ad_creative_bodies": [{"body": "Copy.", "media": "poster.png"}]
+        },
+        "kind": "invalid_type",
+        "field": "media"
+      },
+      "media_without_a_key": {
+        "ad": {
+          "ad_id": "mock-ad-000414",
+          "ad_creative_bodies": [
+            {"body": "Copy.", "media": [{"url": "https://cdn.example.invalid/p/anonymous.png"}]}
+          ]
+        },
+        "kind": "missing_identity",
+        "field": "media[0].key"
+      },
+      "unusable_link_scheme": {
+        "ad": {
+          "ad_id": "mock-ad-000415",
+          "ad_creative_bodies": [
+            {"body": "Copy.", "link_url": "ftp://assets.example.invalid/poster.png"}
+          ]
+        },
+        "kind": "invalid_url",
+        "field": "link_url"
+      },
+      "schemeless_link": {
+        "ad": {
+          "ad_id": "mock-ad-000416",
+          "ad_creative_bodies": [{"body": "Copy.", "link_url": "harbourline.example.invalid/offer"}]
+        },
+        "kind": "invalid_url",
+        "field": "link_url"
+      },
+      "unparseable_date": {
+        "ad": {
+          "ad_id": "mock-ad-000417",
+          "ad_delivery_start_time": "02-07-2026",
+          "ad_creative_bodies": [{"body": "Copy."}]
+        },
+        "kind": "invalid_date",
+        "field": "ad_delivery_start_time"
+      },
+      "date_without_an_offset": {
+        "ad": {
+          "ad_id": "mock-ad-000418",
+          "ad_delivery_start_time": "2026-07-02T11:15:00",
+          "ad_creative_bodies": [{"body": "Copy."}]
+        },
+        "kind": "invalid_date",
+        "field": "ad_delivery_start_time"
+      },
+      "date_not_a_string": {
+        "ad": {
+          "ad_id": "mock-ad-000419",
+          "ad_delivery_start_time": 20260702,
+          "ad_creative_bodies": [{"body": "Copy."}]
+        },
+        "kind": "invalid_type",
+        "field": "ad_delivery_start_time"
+      },
+      "media_width_below_one": {
+        "ad": {
+          "ad_id": "mock-ad-000420",
+          "ad_creative_bodies": [
+            {"body": "Copy.", "media": [{"key": "mock-media-0420-a", "width": 0}]}
+          ]
+        },
+        "kind": "invalid_type",
+        "field": "media[0].width"
+      },
+      "record_not_an_object": {
+        "ad": "mock-ad-000421",
+        "kind": "malformed_payload",
+        "field": "record"
+      }
+    }
+  },
+  "payloads": {
+    "empty": {"ads": []},
+    "no_ads_key": {"meta": {"cursor": null}},
+    "ads_key_not_a_list": {"ads": {"mock-ad-000401": {}}},
+    "partial": {
+      "ads": [
+        {"ad_id": "mock-ad-000431", "ad_creative_bodies": [{"body": "First, and readable."}]},
+        {"page_id": "mock-page-0004", "ad_creative_bodies": [{"body": "Second, and unreadable."}]},
+        {"ad_id": "mock-ad-000433", "ad_creative_bodies": [{"body": "Third, and readable."}]}
+      ]
+    },
+    "duplicate_identifier": {
+      "ads": [
+        {
+          "ad_id": "mock-ad-000441",
+          "page_id": "mock-page-0004",
+          "ad_creative_bodies": [{"body": "The same ad, as first served in this walk."}]
+        },
+        {
+          "ad_id": "mock-ad-000441",
+          "page_id": "mock-page-0004",
+          "ad_creative_bodies": [{"body": "The same ad, as re-served in this walk, with revised copy."}]
+        }
+      ]
+    },
+    "all_unreadable": {
+      "ads": [
+        {"page_id": "mock-page-0004", "ad_creative_bodies": [{"body": "Unreadable."}]},
+        {"ad_id": "mock-ad-000452", "ad_creative_bodies": [{"body": "Copy.", "link_url": "ftp://a.example.invalid/x"}]}
+      ]
+    }
+  }
+}
