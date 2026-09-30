@@ -85,7 +85,8 @@ Facts resolved since the S0.1 entry was written (each re-verified on this machin
 - The **Docker daemon is RUNNING** (ServerVersion 29.8.0), not stopped.
 - Prerequisite "install `uv`" is RESOLVED. Prerequisite "start Docker Desktop" is RESOLVED.
 - Latest commit before this remediation was `dc3acc4` (2 commits at that point).
-- Remediation commit hash: see the follow-up line appended under this entry.
+- Remediation commit: `7c2040e` "fix: close S0.1 review findings" (5 files, +90/-17).
+  It could not contain its own hash, so it is recorded here in this follow-up commit.
 
 Validation run after the five fixes (all passed):
 - `ruff check .` -> All checks passed, exit 0. (Was exit 1 on S0.1: T201 print.)
