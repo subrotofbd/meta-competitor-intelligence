@@ -1,0 +1,181 @@
+# ============================================================
+# Brandset Meta Competitor Intelligence
+# .gitignore
+#
+# NOTE: Project documentation (*.md) at the repo root is deliberately
+# TRACKED. Do not add a blanket "*.md" rule.
+# ============================================================
+
+# ------------------------------------------------------------
+# Secrets -- NEVER commit these
+# ------------------------------------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+secrets/
+credentials/
+*.service-account.json
+
+# ------------------------------------------------------------
+# Python
+# ------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+sdist/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# ------------------------------------------------------------
+# Virtual environments
+# ------------------------------------------------------------
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+.python-version.local
+
+# ------------------------------------------------------------
+# uv
+# ------------------------------------------------------------
+# NOTE: uv.lock IS intentionally NOT ignored. It is a lockfile and
+# must be committed so installs are reproducible.
+.uv/
+uv-cache/
+.uv-cache/
+
+# ------------------------------------------------------------
+# Testing / coverage / type caches
+# ------------------------------------------------------------
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.dmypy.json
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.tox/
+.nox/
+.hypothesis/
+
+# ------------------------------------------------------------
+# Local PostgreSQL data (if ever run outside Docker)
+# ------------------------------------------------------------
+pgdata/
+postgres-data/
+*.sqlite
+*.sqlite3
+*.db
+*.dump
+*.sql.gz
+
+# ------------------------------------------------------------
+# Local storage / media store (LocalFsStore dev target)
+# Served through authenticated backend routes -- never committed.
+# ------------------------------------------------------------
+storage/
+storage/*
+!storage/.gitkeep
+!storage/README.md
+
+# ------------------------------------------------------------
+# Local artifacts from scripts/ (e.g. smoke_real reports)
+# ------------------------------------------------------------
+reports/
+artifacts/
+*.local.json
+
+# ------------------------------------------------------------
+# Node / Vite / React
+# ------------------------------------------------------------
+node_modules/
+.pnpm-store/
+.yarn/
+.yarn-integrity
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.vite/
+dist-ssr/
+*.local
+.eslintcache
+.stylelintcache
+
+# ------------------------------------------------------------
+# Docker
+# ------------------------------------------------------------
+docker-data/
+.docker-data/
+*.tar
+*.tar.gz
+
+# ------------------------------------------------------------
+# Test artifacts / E2E
+# ------------------------------------------------------------
+test-results/
+playwright-report/
+blob-report/
+playwright/.cache/
+screenshots/
+*.spec.ts-snapshots/
+
+# ------------------------------------------------------------
+# IDE / editor
+# ------------------------------------------------------------
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.swp
+*.swo
+*~
+.zed/
+*.sublime-workspace
+
+# ------------------------------------------------------------
+# OS
+# ------------------------------------------------------------
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+desktop.ini
+
+# ------------------------------------------------------------
+# Logs
+# ------------------------------------------------------------
+*.log
+logs/
+npm-debug.log*
+
+# ------------------------------------------------------------
+# Windows
+# ------------------------------------------------------------
+*.lnk
+Thumbs.db
+ehthumbs.db
+desktop.ini
+desktop.ini
