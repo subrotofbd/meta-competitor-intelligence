@@ -91,7 +91,9 @@ postgres-data/
 # Local storage / media store (LocalFsStore dev target)
 # Served through authenticated backend routes -- never committed.
 # ------------------------------------------------------------
-storage/
+# NOTE: do not add a bare `storage/` line here. Git cannot re-include a file
+# when a parent directory is excluded, so `storage/` would make the two
+# negations below silently dead. `storage/*` + negations is the correct form.
 storage/*
 !storage/.gitkeep
 !storage/README.md

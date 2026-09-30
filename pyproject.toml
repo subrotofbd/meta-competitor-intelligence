@@ -75,6 +75,11 @@ packages = ["backend/app"]
 line-length = 100
 target-version = "py312"
 src = ["backend"]
+# Never let the formatter touch the protected project documents.
+# Ruff >=0.16 formats Python code blocks inside Markdown, which would
+# silently rewrite ARCHITECTURE.md, AGENTS.md and friends. Those files
+# are governance records and must only change by deliberate checkpoint edit.
+extend-exclude = ["*.md"]
 
 [tool.ruff.lint]
 select = [

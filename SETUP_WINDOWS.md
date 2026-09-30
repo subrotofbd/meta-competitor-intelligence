@@ -2,26 +2,27 @@
 
 Windows setup and verification for this project.
 
-**Verified state as of 2026-09-30 (checkpoint S0.1), on this machine:**
+**Verified state as of 2026-09-30 (re-verified during S0.1 remediation), on this machine:**
 
 | Tool | Version | Status |
 |---|---|---|
 | Python (`python`) | 3.12.10 | ✅ Working |
 | Python (`py`) | 3.14.3 | ⚠️ Installed but **wrong version** — do not use for this project |
 | `python3` | — | ❌ **Does not work.** Microsoft Store alias stub |
-| `uv` | — | ❌ **Not installed** |
+| `uv` | 0.12.21 | ✅ Installed and working (`C:\Users\DELL\.local\bin\uv.exe`) |
 | Node.js | v24.19.0 | ✅ Working |
 | npm | 11.19.0 | ✅ Working |
 | Git | 2.56.0.windows.1 | ✅ Working |
 | Docker CLI | 29.8.0 | ✅ Working |
 | Docker Compose | v5.5.1 | ✅ Working |
-| **Docker daemon** | — | ❌ **NOT RUNNING.** Docker Desktop is not started |
+| **Docker daemon** | 29.8.0 | ✅ **RUNNING.** Verified with `docker info` |
 | PostgreSQL client (`psql`) | — | ❌ Not installed (provided by the container in S0.2) |
 
-> **Docker is installed but the daemon is stopped.** `docker --version`
-> succeeding does **not** mean Docker works. You must run
-> `docker info` (section 6) to confirm the daemon is actually up. Do not claim
-> Docker is working based on the CLI version alone.
+> **The daemon was stopped when this document was first written; it is running
+> now.** `docker --version` succeeding still does **not** mean Docker works.
+> Run `docker info` (section 6) to confirm the daemon is actually up. Do not
+> claim Docker is working based on the CLI version alone, and re-verify if the
+> machine has been rebooted.
 
 ---
 
@@ -92,8 +93,9 @@ python -c "import sys,importlib.util; print('python:',sys.version.split()[0]); p
 
 ## 3. Install and verify `uv` (required)
 
-`uv` is the approved package manager for this project. It is **not currently
-installed**.
+`uv` is the approved package manager for this project. It **is installed and
+working on this machine** (0.12.21). The install step below is retained for a
+fresh machine or a reset.
 
 ```powershell
 # Check first
@@ -147,8 +149,10 @@ git config user.email "you@example.com"
 
 ## 6. Start and verify Docker Desktop
 
-**The Docker daemon is currently stopped.** Start Docker Desktop from the Start
-Menu (or the system tray icon), and wait for the whale icon to report running.
+**The Docker daemon is running** (verified 2026-09-30 via `docker info`,
+ServerVersion 29.8.0). If it is **not** running on your machine, start Docker
+Desktop from the Start Menu (or the system tray icon), and wait for the whale
+icon to report running.
 
 Then verify the **daemon**, not just the CLI:
 

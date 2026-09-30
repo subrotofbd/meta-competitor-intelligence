@@ -52,3 +52,70 @@ Open / needs human decision before S0.2: install `uv`; start Docker Desktop or a
 Postgres fallback; set a real git identity.
 
 Next checkpoint: S0.2 (config + logging + SQLAlchemy base + Alembic + Postgres + interfaces). NOT started.
+
+## 2026-09-30, Checkpoint S0.1 remediation (close review findings)
+
+**S0.1 remediation complete.** Scope was strictly the five required fixes from the S0.1
+review. S0.2 was NOT started. No database, migrations, compose services, providers, AI,
+frontend, auth, media or video code was added. The S0.1 entry above is left intact as a
+historical record; this addendum corrects the facts in it that had since gone stale.
+
+Fixes made (5 files changed, 23 insertions, 17 deletions):
+1. `PROJECT_MEMORY.md` - this addendum. Corrects the stale tooling/git facts below.
+2. `SETUP_WINDOWS.md` - status table now records `uv` 0.12.21 installed and the Docker
+   daemon RUNNING (ServerVersion 29.8.0, verified with `docker info`). Also corrected the
+   two stale status claims inside the instruction sections (section 3 `uv`, section 6
+   Docker). All setup and verification instructions were left intact; no tooling status
+   was invented.
+3. `pyproject.toml` - added `extend-exclude = ["*.md"]` under `[tool.ruff]`. Ruff 0.16
+   formats Python code blocks inside Markdown, so `ruff format .` would have rewritten
+   `ARCHITECTURE.md` and other protected governance documents. No other Ruff rule changed.
+4. `.gitignore` - removed the bare `storage/` line. Git cannot re-include a file when a
+   parent directory is excluded, so that line silently made `!storage/.gitkeep` and
+   `!storage/README.md` dead. Replaced with a comment recording why it must not return.
+5. `worker/__main__.py` - removed the duplicate `print(...)` placeholder, kept
+   `logger.info(...)`. No structured logging was built; S0.2 owns that.
+
+Facts resolved since the S0.1 entry was written (each re-verified on this machine):
+- `uv` 0.12.21 IS installed and working at `C:\Users\DELL\.local\bin\uv.exe`.
+- FastAPI and the backend dependencies ARE installed (fastapi 0.142.2, uvicorn 0.54.0,
+  sqlalchemy 2.0.54, alembic 1.20.0, pydantic 2.13.5, pydantic-settings 2.15.0,
+  psycopg 3.3.6). The earlier "import app.main FAILS" note is no longer true.
+- `uv.lock` EXISTS and is committed. `uv lock --check` passes, so installs are reproducible.
+- The **Docker daemon is RUNNING** (ServerVersion 29.8.0), not stopped.
+- Prerequisite "install `uv`" is RESOLVED. Prerequisite "start Docker Desktop" is RESOLVED.
+- Latest commit before this remediation was `dc3acc4` (2 commits at that point).
+- Remediation commit hash: see the follow-up line appended under this entry.
+
+Validation run after the five fixes (all passed):
+- `ruff check .` -> All checks passed, exit 0. (Was exit 1 on S0.1: T201 print.)
+- `ruff format --check .` -> 11 files already formatted, exit 0. Previously it wanted to
+  reformat `ARCHITECTURE.md`; the 10 Markdown files are now out of ruff's scope.
+- `uv lock --check` -> exit 0, 52 packages resolved, lock still consistent with pyproject.
+- `uv run python -c "import app.main"` -> OK, exit 0.
+- `uv run python -c "import worker"` -> OK, exit 0.
+- `uv run mypy` -> Success, no issues in 8 source files, exit 0 (no type regression).
+- `uv run python -m worker` -> exit 0. Note: it is now SILENT on the console, because the
+  `print` was removed and `logger.info` has no handler configured until S0.2. Expected.
+- `git diff --check` -> clean, no whitespace errors and no conflict markers.
+- `.gitignore` storage behaviour verified with `git check-ignore`:
+  `storage/.gitkeep` and `storage/README.md` are COMMITTABLE again, while `storage/photo.jpg`
+  and `storage/media/x.mp4` remain ignored.
+- Only 4 non-memory files were modified. No unrelated file changed. Nothing was deleted.
+
+Known limitations carried forward (unchanged by this remediation): no tests exist yet
+(pytest still exits 5, EXIT_NOTESTSCOLLECTED, by design until S1.1); no docker-compose.yml,
+no database, no migrations, no providers, no AI, no frontend; nothing has been tested
+against live Meta. Open review items deferred on purpose and NOT fixed here (they are not
+blockers): unauthenticated `/docs` and `/openapi.json` in `backend/app/main.py` should be
+gated on `app_env` in S0.2; `.ruff_cache` writes fail with os error 5 (ACL/AV interference,
+cache is gitignored); the detailed S0-S8 -> S0-S3 step mapping is still not written into
+any file.
+
+Git status: no remote configured, nothing pushed, nothing staged from outside this
+checkpoint. The repo-local `user.name`/`user.email` are still the placeholder identity set
+during S0.1 - CHANGE THESE to a real identity before ever pushing.
+
+Next checkpoint: S0.2 (config + logging + SQLAlchemy base + Alembic + Postgres +
+AdDataProvider/AIProvider/MediaStore/JobQueue interfaces). NOT started. Requires explicit
+human approval.

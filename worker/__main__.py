@@ -16,11 +16,6 @@ logger = logging.getLogger("worker")
 def main() -> int:
     """Report that the worker is not implemented yet, then exit cleanly."""
     logger.info("worker entrypoint reached (checkpoint S0.1 placeholder)")
-    print(
-        "worker: not implemented yet.\n"
-        "  Job claiming, retries, and collection orchestration arrive in S0.2/S1.2.\n"
-        "  No jobs were consumed. No database was contacted."
-    )
     return 0
 
 
