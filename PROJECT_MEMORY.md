@@ -614,3 +614,142 @@ Collection orchestration: `jobs` table + `PostgresJobQueue` implementation + the
 ### Git
 `git status` clean. Only S1.1 files changed (see above). `git diff --check` clean. Commit message:
 `feat: establish collection domain schema`. No remote, no push.
+
+---
+
+## 2026-09-30, Checkpoint S1.2 -- Collection Orchestration + Durable Job Queue (COMPLETE)
+
+Approved by the user. Implements the `jobs` table, the real `PostgresJobQueue` behind the existing
+`JobQueue` Protocol, and the per-page/per-country collection orchestrator.
+
+### Files created (3)
+- `backend/app/models/jobs.py` -- `Job` model + `JobStatus` constants. Columns: `kind`, `payload` (JSONB),
+  `status`, `worker_id`, `attempt`, `lease_expires_at`, `started_at`, `finished_at`, `error_message`,
+  `error_type`. 6 check constraints, 3 indexes.
+- `backend/app/services/collection.py` -- `CollectionOrchestrator` with `schedule_collection`,
+  `execute_collection_job`, `_handle_provider_error`, `_persist_provider_run`, `get_run_status`,
+  `get_run_error`. The service boundary for "collect this page in this country".
+- `database/migrations/versions/0003_jobs_table.py` -- the S1.2 migration, extending `0002_collection_domain`.
+
+### Files modified (8)
+- `backend/app/models/__init__.py` -- exports `Job`; S1.2 noted in docstring.
+- `backend/app/services/jobs.py` -- rewritten from fail-closed to real `PostgresJobQueue` with
+  `enqueue`, `claim` (SKIP LOCKED), `complete`, `fail` (with optional `error_type`), `extend_lease`.
+- `backend/app/composition.py` -- adds `build_job_queue`, `build_mock_pages`,
+  `build_collection_orchestrator`.
+- `worker/__main__.py` -- rewritten from no-op to job consumer loop.
+- `backend/tests/test_job_queue.py` -- rewritten from fail-closed tests to 28 real queue tests.
+- `backend/tests/test_schema_integration.py` -- S1.2 revision constants, lineage, downgrade tests.
+- `backend/tests/test_models.py` -- `S1_TABLES` cumulative scope (S1.1 + S1.2).
+- `backend/tests/test_db_base.py` -- checks S1.1+S1.2 metadata.
+- `backend/tests/test_migrations.py` -- 3-revision chain.
+
+### Database migration
+- Revision **`0003_jobs_table`**, `down_revision = "0002_collection_domain"`. Single linear head.
+- `alembic current` -> `0003_jobs_table (head)`; `alembic heads` -> `0003_jobs_table (head)`.
+- `alembic check` -> "No new upgrade operations detected." (exit 0) -- zero drift.
+- `downgrade` renders complete SQL offline without executing it. **Never executed** (issues `DROP`s).
+
+### Queue semantics
+- **Enqueue**: client-side UUID, `json.dumps(payload)` + `CAST(:payload AS JSONB)` for safe JSONB insertion.
+- **Claim**: `SELECT ... FOR UPDATE SKIP LOCKED` -- two workers never claim the same row.
+  A job is available if `status = 'pending'` OR (`status = 'running'` AND `lease_expires_at < now`).
+- **Complete**: sets `status = 'completed'`, clears `worker_id` and `lease_expires_at`.
+- **Fail**: sets `status = 'pending'` (retry) or `'dead'` (max attempts exceeded), records `error_message`
+  and optional `error_type`.
+- **Extend lease**: `UPDATE ... WHERE id = :job_id AND worker_id = :worker_id AND status = 'running'`.
+  Returns `True` if extended, `False` if the job is no longer held by this worker.
+- **Lease duration**: default 5 minutes, configurable via constructor.
+- **Max attempts**: default 5, configurable via constructor.
+
+### Concurrency guarantees
+- `SELECT ... FOR UPDATE SKIP LOCKED` ensures two workers never claim the same job.
+- A worker that dies mid-job releases its lease when its connection closes (PostgreSQL semantics).
+- Lease expiration allows another worker to reclaim the job after `lease_expires_at` passes.
+- Test `test_concurrent_workers_dont_share_jobs` proves 3 workers claiming from 20 jobs get no overlap.
+
+### Orchestration flow
+1. `schedule_collection(page_id)` creates a `collection_runs` row (PENDING) and enqueues a job.
+2. Idempotency: if a PENDING/RUNNING run exists for the same page/country/provider, returns existing
+   or re-enqueues instead of creating a duplicate.
+3. Worker claims the job, calls `execute_collection_job(run_id)`.
+4. Orchestrator marks the run RUNNING, calls the provider (cursor walk), persists each provider call
+   as a `provider_run` + `raw_response` pair.
+5. On success: run status = COMPLETE. On typed provider error: run status = FAILED with error_type.
+6. Worker marks the job complete or failed based on the run status.
+
+### Raw persistence ordering
+- `_persist_provider_run` creates the `provider_run` row first, then the `raw_response` row.
+- The raw payload is stored **before** any parsing/normalization (AGENTS.md section 8).
+- `payload_hash` is computed by the database trigger, not the application.
+
+### Retry/recovery behavior
+- `fail()` returns the job to PENDING (retry) or DEAD (max attempts exceeded).
+- `fail()` accepts an optional `error_type` for typed provider errors.
+- A crashed worker's lease expires after `lease_expires_at`, allowing another worker to reclaim.
+- `extend_lease()` allows a long-running worker to extend its lease before it expires.
+
+### Validation gates (all pass)
+| Gate | Command | Result |
+|---|---|---|
+| Lock | `uv lock --check` | exit 0 |
+| Lint | `uv run ruff check .` | All checks passed |
+| Format | `uv run ruff format --check .` | 59 files already formatted |
+| Types | `uv run mypy backend/app` | Success, no issues in 31 source files |
+| Unit tests | `uv run pytest -m unit -q` | 97 passed |
+| Integration tests | `uv run pytest -m integration -q` | 96 passed |
+| Full suite | `uv run pytest -q` | **409 passed** |
+| Migrations | `uv run alembic current` / `heads` / `check` | `0003_jobs_table (head)`, single head, zero drift |
+| Compose | `docker compose config -q` | exit 0 |
+| Compose ps | `docker compose ps` | healthy, PostgreSQL 16.15 |
+
+### Thermo-nuclear code quality review (self-applied)
+Findings fixed:
+1. **`worker/__main__.py`**: Moved imports to module level; replaced private `_session` access with
+   public `get_run_status()` / `get_run_error()` methods on the orchestrator.
+2. **`collection.py`**: Collapsed 5 nearly identical exception handlers into one
+   `_handle_provider_error()` helper with a type map.
+3. **`jobs.py`**: Merged `fail_with_type` into `fail` with an optional `error_type` parameter,
+   eliminating ~40 lines of duplication.
+
+No remaining findings:
+- No file crosses 1k lines (largest is `jobs.py` at ~370 lines).
+- No business logic in models.
+- No unnecessary wrappers or pass-through helpers.
+- No spaghetti branching.
+- No speculative abstractions.
+
+### Secure-code-guardian review (self-applied)
+No findings:
+- All SQL uses bound parameters (`:id`, `:kind`, `:payload`, etc.). The table name is hardcoded
+  `"jobs"` -- no injection surface.
+- `json.dumps(job.payload)` serializes the payload to a JSON string before binding, preventing
+  psycopg type adaptation errors.
+- No secrets in source. No credentials in migrations.
+- No shell execution. No string-built SQL.
+- The `CAST(:next_status AS VARCHAR)` prevents psycopg `AmbiguousParameter` errors when the same
+  parameter is used in both `SET` and `CASE` clauses.
+
+### Accidental-data-loss-prevention review (self-applied)
+No findings:
+- Jobs are never deleted -- `fail()` returns them to PENDING or marks them DEAD.
+- The `downgrade()` renders DROP statements but is **never executed** (requires explicit consent).
+- Test fixture uses `DELETE FROM jobs` for isolation -- test-only, doesn't affect production data.
+- No `DROP`, `TRUNCATE`, or broad `DELETE` in any migration `upgrade()`.
+
+### Known limitations
+- **No real provider exists.** `MockProvider` is the only registered `AdDataProvider`.
+- **No normalizer yet.** S1.3 owns parsing/normalization of raw responses.
+- **No snapshot state machine.** S2 owns `ad_snapshots`, `not_seen_since`, `presumed_inactive`.
+- **No API endpoints yet.** The orchestrator is a service boundary; routes arrive with the API layer.
+- **No authentication.** Post-S3 seam.
+- **`alembic downgrade` never executed** -- issues `DROP`s requiring explicit consent.
+- **`docker compose config` prints the resolved password** to stdout -- never paste its output.
+- **`.ruff_cache` writes fail with os error 5** -- gitignored, no repo impact.
+- **Repo-local git identity is still the placeholder** `Brandset Dev <dev@brandset.local>`.
+- No remote configured. Nothing pushed.
+
+### Next checkpoint: S1.3
+Normalizer: parse raw provider responses into `RawAdRecord` models, validate, and persist.
+The `raw_responses` table already stores the payload; S1.3 builds the parsing layer on top.
+**Not started without explicit human approval.**

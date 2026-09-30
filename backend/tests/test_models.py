@@ -37,6 +37,9 @@ S11_TABLES = frozenset(
     {"competitors", "facebook_pages", "collection_runs", "provider_runs", "raw_responses"}
 )
 
+#: S1.2 adds the jobs table. This set is the cumulative S1 scope (S1.1 + S1.2).
+S1_TABLES = S11_TABLES | {"jobs"}
+
 S11_MODELS = (Competitor, FacebookPage, CollectionRun, ProviderRun, RawResponse)
 
 #: The explicit index names, and the access pattern each one exists for.
@@ -67,8 +70,13 @@ def test_s11_defines_exactly_the_five_assigned_tables() -> None:
     and the queue table all appear in `models/__init__.py` under later
     checkpoints; if one of them appears here, a later checkpoint's work has been
     pulled backwards into S1.1.
+
+    The check is against the S1.1 assignment (S11_TABLES), not the cumulative
+    S1 metadata (which now includes S1.2's jobs table). The metadata itself is
+    asserted in `test_db_base.py`.
     """
-    assert set(Base.metadata.tables) == S11_TABLES
+    s11_actual = {name for name in Base.metadata.tables if name in S11_TABLES}
+    assert s11_actual == S11_TABLES
 
 
 def test_no_s11_model_is_mapped_twice_or_left_unmapped() -> None:

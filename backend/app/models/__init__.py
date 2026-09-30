@@ -2,10 +2,10 @@
 
 Tables arrive per checkpoint:
   S1.1  competitors, facebook_pages, collection_runs, provider_runs, raw_responses
+  S1.2  jobs (queue implementation detail)
   S2.1  ads, ad_snapshots
   S2.2  ad_creatives, ad_platforms, ad_countries, landing_pages, media_assets
   S3.1  ad_analysis, ai_jobs
-  S0.2  jobs (queue implementation detail)
 
 `users`, `settings` and `audit_logs` appear in `ARCHITECTURE.md` under slice-1
 "Identity" but are assigned to no checkpoint here, and they are deliberately
@@ -26,6 +26,7 @@ Importing this package registers every table on `Base.metadata`, which is what
 `database/migrations/env.py` relies on for autogenerate.
 """
 
+from app.models.jobs import Job
 from app.models.mixins import CountryCodeMixin, TimestampMixin, UuidPrimaryKeyMixin
 from app.models.runs import (
     CollectionRun,
@@ -42,6 +43,7 @@ __all__ = [
     "Competitor",
     "CountryCodeMixin",
     "FacebookPage",
+    "Job",
     "ProviderRun",
     "ProviderRunStatus",
     "RawResponse",

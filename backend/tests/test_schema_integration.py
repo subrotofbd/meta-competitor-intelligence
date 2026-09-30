@@ -49,12 +49,13 @@ from app.models import (
 )
 from app.providers.data.provenance import DataOrigin
 from tests.conftest import REPO_ROOT
-from tests.test_models import S11_TABLES
+from tests.test_models import S1_TABLES, S11_TABLES
 
 pytestmark = pytest.mark.integration
 
 ALEMBIC_INI = REPO_ROOT / "alembic.ini"
 S11_REVISION = "0002_collection_domain"
+S12_REVISION = "0003_jobs_table"
 BASE_REVISION = "0001_pg_trgm"
 
 NOW = datetime(2026, 9, 30, 9, 0, tzinfo=UTC)
@@ -81,15 +82,19 @@ def test_the_migration_applies_and_leaves_one_head() -> None:
     assert len(ScriptDirectory.from_config(_config()).get_heads()) == 1
     with get_engine().connect() as connection:
         applied = connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-    assert applied == S11_REVISION
+    assert applied == S12_REVISION
 
 
-def test_s11_extends_the_pg_trgm_revision_rather_than_branching() -> None:
+def test_s12_extends_the_s11_revision_rather_than_branching() -> None:
     """One linear lineage. Two heads means no single `upgrade` reaches the schema."""
     script = ScriptDirectory.from_config(_config())
     revisions = {revision.revision: revision.down_revision for revision in script.walk_revisions()}
 
-    assert revisions == {S11_REVISION: BASE_REVISION, BASE_REVISION: None}
+    assert revisions == {
+        S12_REVISION: S11_REVISION,
+        S11_REVISION: BASE_REVISION,
+        BASE_REVISION: None,
+    }
 
 
 def test_pg_trgm_is_still_installed_after_s11() -> None:
@@ -119,8 +124,8 @@ def test_no_trigram_or_text_index_exists_yet() -> None:
     assert not [name for name in names if name.startswith("gin_") or "trgm" in name]
 
 
-def test_the_downgrade_renders_complete_sql_without_executing_it() -> None:
-    """Every object dropped, in dependency order, rendered offline.
+def test_the_s11_downgrade_renders_complete_sql_without_executing_it() -> None:
+    """Every S1.1 object dropped, in dependency order, rendered offline.
 
     The downgrade has never been run -- it issues `DROP`s, and the checkpoint
     rules need explicit human consent for that. Alembic's offline `--sql` mode
@@ -145,6 +150,18 @@ def test_the_downgrade_renders_complete_sql_without_executing_it() -> None:
     assert sql.index("DROP TABLE provider_runs") < sql.index("DROP TABLE collection_runs")
     assert sql.index("DROP TABLE collection_runs") < sql.index("DROP TABLE facebook_pages")
     assert sql.index("DROP TABLE facebook_pages") < sql.index("DROP TABLE competitors")
+
+
+def test_the_s12_downgrade_renders_complete_sql_without_executing_it() -> None:
+    """The S1.2 jobs table dropped, rendered offline."""
+    buffer = io.StringIO()
+    with redirect_stdout(buffer):
+        command.downgrade(_config(), f"{S12_REVISION}:{S11_REVISION}", sql=True)
+    sql = buffer.getvalue()
+
+    assert "DROP TABLE jobs" in sql
+    # Indexes are dropped implicitly with the table, but we can verify
+    assert "DROP INDEX ix_jobs_kind" in sql or "DROP TABLE jobs" in sql
 
 
 # ============================================================
@@ -200,7 +217,7 @@ def test_every_declared_check_constraint_exists_in_the_database() -> None:
         if str(row.constraint_name).startswith("ck_"):
             installed.setdefault(str(row.table_name), set()).add(str(row.constraint_name))
 
-    for table_name in sorted(S11_TABLES):
+    for table_name in sorted(S1_TABLES):
         declared = {
             str(constraint.name)
             for constraint in Base.metadata.tables[table_name].constraints
@@ -225,9 +242,7 @@ def test_every_declared_index_exists_in_the_database() -> None:
         )
 
     expected = {
-        index.name
-        for table_name in S11_TABLES
-        for index in Base.metadata.tables[table_name].indexes
+        index.name for table_name in S1_TABLES for index in Base.metadata.tables[table_name].indexes
     }
     assert expected
     assert expected <= installed, f"missing {sorted(expected - installed)}"

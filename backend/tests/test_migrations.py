@@ -44,17 +44,19 @@ def test_history_has_exactly_one_head() -> None:
 def test_history_is_a_single_linear_chain() -> None:
     """One revision per checkpoint, each naming exactly one parent.
 
-    S0.2 asserted a single revision. S1.1 adds the second, so the assertion
-    becomes the property that survives it: a chain with no branch and no gap, so
-    `alembic upgrade head` from `base` reaches the whole schema in order.
+    S0.2 asserted a single revision. S1.1 adds the second. S1.2 adds the third.
+    The assertion becomes the property that survives it: a chain with no branch
+    and no gap, so `alembic upgrade head` from `base` reaches the whole schema
+    in order.
     """
     script = _script_directory()
     assert [revision.revision for revision in script.walk_revisions()] == [
+        "0003_jobs_table",
         "0002_collection_domain",
         "0001_pg_trgm",
     ]
     assert script.get_base() == "0001_pg_trgm"
-    assert list(script.get_heads()) == ["0002_collection_domain"]
+    assert list(script.get_heads()) == ["0003_jobs_table"]
 
 
 def test_every_revision_is_reversible() -> None:

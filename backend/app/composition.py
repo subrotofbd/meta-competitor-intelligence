@@ -18,13 +18,18 @@ the choice between them becomes configuration rather than a code change.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from datetime import datetime
+from datetime import datetime, timedelta
 
+from sqlalchemy.orm import Session
+
+from app.db.session import get_session_factory
 from app.providers.ai.base import AIProvider
 from app.providers.ai.mock import MockAIProvider
 from app.providers.ai.models import CopyAnalysis
 from app.providers.data.base import AdDataProvider
 from app.providers.data.mock import MockPage, MockProvider
+from app.services.collection import CollectionOrchestrator
+from app.services.jobs import JobQueue, PostgresJobQueue
 
 
 def build_ad_provider(
@@ -57,3 +62,84 @@ def build_ai_provider(responses: Mapping[str, CopyAnalysis]) -> AIProvider:
         SDK is installed.
     """
     return MockAIProvider(responses)
+
+
+def build_job_queue(
+    *,
+    lease_duration: timedelta | None = None,
+    max_attempts: int | None = None,
+) -> JobQueue:
+    """Build the job queue for this process.
+
+    Args:
+        lease_duration: How long a worker holds a lease before it expires.
+            Defaults to 5 minutes.
+        max_attempts: Maximum number of attempts before a job is marked DEAD.
+            Defaults to 5.
+
+    Returns:
+        A `JobQueue` implementation. In S1.2 this is always `PostgresJobQueue`.
+    """
+    from app.services.jobs import DEFAULT_LEASE_DURATION, MAX_ATTEMPTS
+
+    return PostgresJobQueue(
+        get_session_factory(),
+        lease_duration=lease_duration or DEFAULT_LEASE_DURATION,
+        max_attempts=max_attempts or MAX_ATTEMPTS,
+    )
+
+
+def build_mock_pages() -> Mapping[str, MockPage]:
+    """Load the mock page corpus from the test fixtures.
+
+    This is the same corpus used by tests, exposed here so the worker can
+    run against deterministic mock data without importing test modules.
+    """
+    import json
+    from pathlib import Path
+
+    from app.providers.data.mock import MockPage
+    from app.providers.data.models import PageRef
+
+    fixtures_path = (
+        Path(__file__).resolve().parents[2]
+        / "backend"
+        / "tests"
+        / "fixtures"
+        / "ad_provider"
+        / "corpus.json"
+    )
+    data = json.loads(fixtures_path.read_text(encoding="utf-8"))
+
+    pages: dict[str, MockPage] = {}
+    for entry in data["pages"]:
+        reference = PageRef(**entry["page"])
+        pages[reference.provider_page_id] = MockPage(
+            page=reference,
+            batches=entry["batches"],
+        )
+    return pages
+
+
+def build_collection_orchestrator(
+    *,
+    lease_duration: timedelta | None = None,
+    max_attempts: int | None = None,
+) -> tuple[CollectionOrchestrator, Session]:
+    """Build a collection orchestrator with all its dependencies.
+
+    Returns the orchestrator AND the session it uses. The caller is responsible
+    for closing the session.
+
+    This is a convenience for the worker entrypoint and API routes.
+    """
+    from app.services.collection import build_collection_orchestrator as _build
+
+    session_factory = get_session_factory()
+    session = session_factory()
+
+    provider = build_ad_provider(build_mock_pages())
+    job_queue = build_job_queue(lease_duration=lease_duration, max_attempts=max_attempts)
+
+    orchestrator = _build(session, provider, job_queue)
+    return orchestrator, session
