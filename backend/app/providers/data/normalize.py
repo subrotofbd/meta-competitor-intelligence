@@ -9,20 +9,17 @@ fetch is not quietly kept.
 
 ## Where this sits in the collection flow
 
-`ARCHITECTURE.md` gives the order as collect -> keep raw -> normalize, and the
-intent is that a parser mistake can be fixed against the stored payload instead
-of costing us the run. That is not yet true end to end: `MockProvider` still
-normalises inside `fetch_page_ads`, so a record it cannot read raises before
-`CollectionOrchestrator` reaches its raw-persist step, and the payload is lost
-with the exception. The fix belongs in S2.1, which is the checkpoint that owns
-persistence order -- moving the call is not this checkpoint's business, and
-guessing at it here would be worse than recording it. The seam this module
-provides is the part that is safe to build now: it is a pure function, so S2.1
-can call it on an already-stored payload and get the same answer.
+`ARCHITECTURE.md` gives the order as collect -> keep raw -> normalize, and this
+module is the second step. `CollectionOrchestrator` writes the provider response
+to `raw_responses` and commits it *before* calling anything here, so a parser
+mistake is a re-runnable opinion about evidence that is already durable. A
+reading that refuses a record costs that record, not the response it arrived in.
 
-For the same reason this module never opens a session, writes a file, or
-reaches the network, which is what `test_architecture_boundaries` checks for
-every provider package.
+This module never opens a session, writes a file, or reaches the network, which
+is what `test_architecture_boundaries` checks for every provider package. That
+is not a style preference: it is what makes re-reading a stored payload during a
+replay possible, and what keeps a parser out of the position of deciding what is
+worth keeping.
 
 ## What "deterministic" means here
 

@@ -217,23 +217,28 @@ class CostEstimate(_ContractModel):
 
 
 class ProviderResult(_ContractModel):
-    """One page of provider output, plus everything needed to account for it.
+    """One page of provider output: what the provider said, and about the call.
 
-    `raw` and `records` are both present on purpose. `raw` is what the provider
-    said; `records` is our reading of it. Keeping both lets the orchestrator
-    store the original before trusting the interpretation.
+    There is deliberately no normalised `records` field. A provider returns
+    provider data; turning it into `RawAdRecord` is `app.providers.data
+    .normalize`'s job, and the orchestrator's, at a point where the raw
+    response has already been stored.
+
+    The field used to be here, and it was the reason this ordering was wrong.
+    A provider that read its own payload could refuse to return at all, which
+    meant a malformed record raised *before* `raw` reached `raw_responses` --
+    so a parser opinion cost us the evidence the parser was arguing about. A
+    provider cannot lose data we never gave it.
 
     Attributes:
-        raw: The unparsed response, to be persisted with a `payload_hash`.
-        records: The normalised reading of `raw`. May be empty even when `raw`
-            is not, which is a signal worth keeping rather than hiding.
+        raw: The unparsed response, to be persisted with a `payload_hash` before
+            anything tries to read it.
         next_cursor: Cursor for the following page, or `None` at the end.
         request_meta: Facts about the call itself.
         cost_estimate: Expected cost of the call, with its method.
     """
 
     raw: RawPayload
-    records: tuple[RawAdRecord, ...]
     next_cursor: str | None = None
     request_meta: RequestMeta
     cost_estimate: CostEstimate

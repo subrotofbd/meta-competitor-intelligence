@@ -16,9 +16,9 @@ from datetime import UTC, datetime
 import pytest
 
 from app.providers.data.base import AdDataProvider
-from app.providers.data.errors import SchemaChanged
 from app.providers.data.mock import MockBatch, MockPage, MockProvider
 from app.providers.data.models import AdFormat, PageRef, ProviderResult, RawAdRecord
+from app.providers.data.normalize import NormalizationErrorKind, normalize_payload
 from app.providers.data.provenance import DataOrigin, EvidenceClass, evidence_class_for
 
 pytestmark = pytest.mark.contract
@@ -29,12 +29,23 @@ PAGE_TWO = PageRef(provider_page_id="mock-page-0002", page_name="Northwind Fitne
 FIXED_NOW = datetime(2026, 9, 1, 12, 0, tzinfo=UTC)
 
 
+def _read(provider: AdDataProvider, page: PageRef, country: str, cursor: str | None = None):
+    """Fetch one batch and read it, the way the orchestrator now does.
+
+    The provider returns provider data only, so the reading happens here. Every
+    scenario test below goes through this, which means each one is also asserting
+    that the payload a provider serves is a payload the normalizer can read.
+    """
+    result = provider.fetch_page_ads(page, country, cursor=cursor)
+    return normalize_payload(result.raw)
+
+
 def _walk(provider: AdDataProvider, page: PageRef, country: str) -> Iterator[RawAdRecord]:
     """Collect every record a full cursor walk yields, in order."""
     cursor: str | None = None
     while True:
         result = provider.fetch_page_ads(page, country, cursor=cursor)
-        yield from result.records
+        yield from normalize_payload(result.raw).records
         cursor = result.next_cursor
         if cursor is None:
             return
@@ -87,7 +98,7 @@ def test_fetching_is_deterministic(ad_provider: AdDataProvider) -> None:
 
 
 def test_scenario_01_image_ad(ad_provider: AdDataProvider) -> None:
-    record = ad_provider.fetch_page_ads(PAGE_ONE, "IN").records[0]
+    record = _read(ad_provider, PAGE_ONE, "IN").records[0]
     assert record.external_ad_id == "mock-ad-000101"
     assert record.display_format is AdFormat.IMAGE
     assert len(record.media) == 1
@@ -101,7 +112,7 @@ def test_scenario_01_image_ad(ad_provider: AdDataProvider) -> None:
 
 
 def test_scenario_02_video_ad(ad_provider: AdDataProvider) -> None:
-    record = ad_provider.fetch_page_ads(PAGE_ONE, "IN").records[1]
+    record = _read(ad_provider, PAGE_ONE, "IN").records[1]
     assert record.display_format is AdFormat.VIDEO
     assert record.media[0].duration_seconds is not None
     assert float(record.media[0].duration_seconds) == pytest.approx(91.4)
@@ -113,7 +124,7 @@ def test_scenario_02_video_ad(ad_provider: AdDataProvider) -> None:
 
 
 def test_scenario_03_carousel_ad(ad_provider: AdDataProvider) -> None:
-    carousel = ad_provider.fetch_page_ads(PAGE_ONE, "IN", cursor="mock-cursor-0001-a").records[0]
+    carousel = _read(ad_provider, PAGE_ONE, "IN", "mock-cursor-0001-a").records[0]
     assert carousel.external_ad_id == "mock-ad-000103"
     assert carousel.display_format is AdFormat.CAROUSEL
     assert len(carousel.media) == 3
@@ -255,26 +266,39 @@ def test_a_full_walk_visits_every_batch_once(ad_provider: AdDataProvider) -> Non
 def test_an_unknown_cursor_ends_the_walk_without_failing(ad_provider: AdDataProvider) -> None:
     """A provider that has moved past a cursor has finished, not broken."""
     result = ad_provider.fetch_page_ads(PAGE_ONE, "IN", cursor="mock-cursor-that-was-never-issued")
-    assert result.records == ()
+    assert normalize_payload(result.raw).records == ()
     assert result.next_cursor is None
 
 
-def test_raw_and_records_describe_the_same_response(ad_provider: AdDataProvider) -> None:
-    """`raw` is what the provider said; `records` is our reading of it."""
+def test_raw_and_the_reading_of_it_describe_the_same_response(
+    ad_provider: AdDataProvider,
+) -> None:
+    """`raw` is what the provider said; the reading is what we made of it.
+
+    They are two different things on purpose -- the whole point of storing `raw`
+    is that the reading can be wrong and the raw can be kept -- but they must
+    still be about the same response. A reading that invented, dropped or
+    reordered a record would be the failure this pairing exists to catch.
+    """
     result = ad_provider.fetch_page_ads(PAGE_ONE, "IN")
-    assert len(result.raw["ads"]) == len(result.records)
-    assert result.raw["ads"][0]["ad_id"] == result.records[0].external_ad_id
+    reading = normalize_payload(result.raw)
+
+    assert reading.errors == ()
+    assert len(result.raw["ads"]) == len(reading.records)
+    assert [ad["ad_id"] for ad in result.raw["ads"]] == [
+        record.external_ad_id for record in reading.records
+    ]
 
 
 def test_an_unmodelled_format_is_kept_but_not_guessed(ad_provider: AdDataProvider) -> None:
-    record = ad_provider.fetch_page_ads(PAGE_TWO, "GB", cursor="mock-cursor-0002-a").records[-1]
+    record = _read(ad_provider, PAGE_TWO, "GB", "mock-cursor-0002-a").records[-1]
     assert record.display_format is None
     assert record.provider_metadata["format"] == "DYNAMIC"
 
 
 def test_a_sparse_record_stays_sparse(ad_provider: AdDataProvider) -> None:
     """A record that reported almost nothing keeps reporting almost nothing."""
-    record = ad_provider.fetch_page_ads(PAGE_TWO, "GB", cursor="mock-cursor-0002-a").records[-1]
+    record = _read(ad_provider, PAGE_TWO, "GB", "mock-cursor-0002-a").records[-1]
     assert record.external_ad_id == "mock-ad-000203"
     assert record.ad_status is None
     assert record.meta_delivery_start is None
@@ -289,7 +313,7 @@ def test_a_sparse_record_stays_sparse(ad_provider: AdDataProvider) -> None:
 
 def test_unmodelled_provider_fields_survive(ad_provider: AdDataProvider) -> None:
     """Nothing observed is thrown away, at the record level or the body level."""
-    record = ad_provider.fetch_page_ads(PAGE_ONE, "IN").records[0]
+    record = _read(ad_provider, PAGE_ONE, "IN").records[0]
     assert record.provider_metadata["experiment_variant"] == "a"
     assert record.provider_metadata["link_title"] == "See the cycle test"
     assert "ad_creative_bodies" not in record.provider_metadata
@@ -306,35 +330,69 @@ def test_a_page_the_corpus_does_not_hold_yields_no_records() -> None:
     """A provider that does not track a page has no ads for it -- not an error."""
     provider = MockProvider()
     result = provider.fetch_page_ads(PageRef(provider_page_id="mock-page-9999"), "IN")
-    assert result.records == ()
+    assert result.raw == {"ads": []}
     assert result.next_cursor is None
 
 
-def test_a_malformed_record_stops_the_run_loudly() -> None:
-    """Filling a required field with a guess would store invented data as observed.
+# ============================================================
+# A malformed record is the reader's problem, not the provider's
+# ============================================================
 
-    So a record with no usable id raises `SchemaChanged` -- terminal, and not
-    retryable, because retrying would only produce the same bad record.
+
+def test_a_malformed_record_is_served_untouched() -> None:
+    """A record with no usable id comes back exactly as the corpus holds it.
+
+    This is the correction. The provider used to read its own payload and raise
+    `SchemaChanged`, which meant the response died with the opinion -- the very
+    record we needed to look at was the one we could no longer see. Now the
+    provider has no opinion, and the caller decides what an unreadable record
+    means.
     """
     page = MockPage(
         page=PAGE_ONE,
         batches=(MockBatch(raw={"ads": [{"page_id": "mock-page-0001"}]}),),
     )
     provider = MockProvider({PAGE_ONE.provider_page_id: page})
-    with pytest.raises(SchemaChanged) as raised:
-        provider.fetch_page_ads(PAGE_ONE, "IN")
-    assert raised.value.retryable is False
-    assert raised.value.expected.startswith("ad_id")
+
+    result = provider.fetch_page_ads(PAGE_ONE, "IN")
+
+    assert result.raw == {"ads": [{"page_id": "mock-page-0001"}]}
 
 
-def test_a_record_with_no_creative_body_also_stops_the_run() -> None:
+def test_a_malformed_record_is_reported_when_it_is_read() -> None:
+    """Filling a required field with a guess would store invented data.
+
+    So the record produces no `RawAdRecord` and a structured error naming the
+    field, rather than one. The error is a report about the payload, which is
+    still in hand.
+    """
+    page = MockPage(
+        page=PAGE_ONE,
+        batches=(MockBatch(raw={"ads": [{"page_id": "mock-page-0001"}]}),),
+    )
+    provider = MockProvider({PAGE_ONE.provider_page_id: page})
+
+    result = provider.fetch_page_ads(PAGE_ONE, "IN")
+    reading = normalize_payload(result.raw)
+
+    assert reading.records == ()
+    assert len(reading.errors) == 1
+    assert reading.errors[0].kind is NormalizationErrorKind.MISSING_IDENTITY
+    assert reading.errors[0].field == "ad_id"
+
+
+def test_a_record_with_no_creative_body_is_also_reported_rather_than_guessed() -> None:
     page = MockPage(
         page=PAGE_ONE,
         batches=(MockBatch(raw={"ads": [{"ad_id": "mock-ad-000199"}]}),),
     )
     provider = MockProvider({PAGE_ONE.provider_page_id: page})
-    with pytest.raises(SchemaChanged):
-        provider.fetch_page_ads(PAGE_ONE, "IN")
+
+    reading = normalize_payload(provider.fetch_page_ads(PAGE_ONE, "IN").raw)
+
+    assert reading.records == ()
+    assert reading.errors[0].kind is NormalizationErrorKind.MALFORMED_PAYLOAD
+    assert reading.errors[0].field == "ad_creative_bodies"
 
 
 # ============================================================

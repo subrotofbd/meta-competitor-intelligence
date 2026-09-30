@@ -185,17 +185,15 @@ def test_an_unmodelled_format_stays_unmodelled() -> None:
 # ============================================================
 
 
-def test_a_result_carries_all_five_contract_fields() -> None:
+def test_a_result_carries_all_four_contract_fields() -> None:
     result = ProviderResult(
         raw={"ads": []},
-        records=(),
         next_cursor="next",
         request_meta=_request_meta(),
         cost_estimate=_cost(),
     )
     assert set(ProviderResult.model_fields) == {
         "raw",
-        "records",
         "next_cursor",
         "request_meta",
         "cost_estimate",
@@ -203,12 +201,23 @@ def test_a_result_carries_all_five_contract_fields() -> None:
     assert result.next_cursor == "next"
 
 
+def test_a_result_carries_no_reading_of_its_own_payload() -> None:
+    """A provider returns provider data. Reading it is not the provider's job.
+
+    The field this rules out used to be here, and it is why a malformed record
+    could cost us the response it arrived in: a provider that reads its own
+    payload can refuse to return at all, so the refusal happens before anything
+    is stored. With no reading to disagree with, `raw` is all a provider has and
+    all we need to keep.
+    """
+    assert "records" not in ProviderResult.model_fields
+
+
 def test_a_result_without_cost_accounting_is_rejected() -> None:
     """Silence would be indistinguishable from a free request."""
     with pytest.raises(ValidationError):
         ProviderResult(
             raw={"ads": []},
-            records=(),
             request_meta=_request_meta(),
         )
 
@@ -225,7 +234,6 @@ def test_the_raw_payload_is_the_only_untyped_value() -> None:
     raw: RawPayload = [{"anything": [1, 2, 3]}]
     result = ProviderResult(
         raw=raw,
-        records=(),
         request_meta=_request_meta(),
         cost_estimate=_cost(),
     )

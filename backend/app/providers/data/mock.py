@@ -11,22 +11,25 @@ rather than on fragments of one.
 
 ## What it actually does
 
-The corpus is injected at construction, and each record is stored twice: as the
-`raw` dict the provider "received", and as the normalised `RawAdRecord`. The
-reading of the first into the second is `app.providers.data.normalize`, so the
-field mapping exists once for the whole product rather than once per provider.
-
-The provider's own policy is all-or-nothing: a batch containing a record it
-cannot read raises `SchemaChanged` rather than returning a partial page, because
-a silently shortened page is indistinguishable from a page that genuinely held
-fewer ads. Callers that would rather keep the good records and be told about
-the bad one call `normalize_payload` directly.
+The corpus is injected at construction and served verbatim. This provider
+returns provider data and nothing else: it does not read the payload, does not
+decide what a record means, and does not judge whether one is well formed.
+`app.providers.data.normalize` does the reading, and the orchestrator calls it
+*after* the raw response is stored, so a malformed record can be reported
+without the evidence for that report being thrown away first.
 
 ## What it refuses to do
 
 No network, no filesystem, no database, no clock of its own beyond the one
-injected. A `Blocked` or a `SchemaChanged` here means the corpus is malformed,
-which is a bug to fix, not a condition to work around.
+injected -- and no judgement. It raises nothing. `Blocked`, `SchemaChanged` and
+the rest are the vocabulary of a provider that can be *reached and understood*;
+this one is served from memory, so its only failure modes are being handed a
+cursor it does not recognise, which ends a walk rather than breaking it.
+
+It also refuses to shorten a page. A caller that ignores the errors it gets from
+`normalize_payload` and reads `raw` directly will get a page that is quietly
+short -- the same reason the provider's all-or-nothing policy used to exist, and
+the reason `CollectionOutcome` carries the status alongside the records.
 """
 
 from __future__ import annotations
@@ -37,18 +40,15 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Final
 
-from app.providers.data.errors import SchemaChanged
 from app.providers.data.models import (
     CanaryResult,
     CostEstimate,
     PageRef,
     ProviderCapabilities,
     ProviderResult,
-    RawAdRecord,
     RawPayload,
     RequestMeta,
 )
-from app.providers.data.normalize import normalize_payload
 from app.providers.data.provenance import DataOrigin
 
 MOCK_CAPABILITIES: Final = ProviderCapabilities(
@@ -130,30 +130,29 @@ class MockProvider:
     ) -> ProviderResult:
         """Serve one batch for `page`, starting at `cursor`.
 
+        Provider data and nothing else. The payload is returned exactly as the
+        corpus holds it, including records that no reader could make sense of:
+        a parser's opinion about one record must not be able to cost us the whole
+        response, and this provider is the one place where that opinion used to
+        live. Reading is the orchestrator's job, after the raw has been stored.
+
         A page the corpus does not hold yields an empty result rather than an
         error: a provider that does not track a page really does have no ads for
-        it. The orchestrator sees the empty record count; raising here would
-        turn an ordinary "nothing to report" into a run failure.
-
-        Raises:
-            SchemaChanged: A corpus record is malformed. That is a bug in the
-                fixture, and it must be loud.
+        it, and raising would turn an ordinary "nothing to report" into a run
+        failure.
         """
         requested_at = self._clock()
         fixture = self._pages.get(page.provider_page_id)
         batch = None if fixture is None else _batch_at(fixture, cursor)
 
         raw: RawPayload = {"ads": []}
-        records: tuple[RawAdRecord, ...] = ()
         next_cursor: str | None = None
         if batch is not None:
             raw = batch.raw
             next_cursor = batch.next_cursor
-            records = self._read_all(raw)
 
         return ProviderResult(
             raw=raw,
-            records=records,
             next_cursor=next_cursor,
             request_meta=RequestMeta(
                 provider=self.name,
@@ -165,25 +164,6 @@ class MockProvider:
             ),
             cost_estimate=self._cost_estimate,
         )
-
-    def _read_all(self, raw: RawPayload) -> tuple[RawAdRecord, ...]:
-        """Normalise a whole batch, or refuse the batch.
-
-        `normalize_payload` is partial by design, which is right for a caller
-        that wants the good records. This provider is all-or-nothing instead: a
-        page returned short would be indistinguishable from a page that really
-        held fewer ads, so the first failure stops the batch and is reported.
-        """
-        result = normalize_payload(raw)
-        if result.errors:
-            first = result.errors[0]
-            raise SchemaChanged(
-                f"provider record at index {first.index} could not be read",
-                provider=self.name,
-                expected=f"{first.field}: a value this provider can normalize",
-                found=f"{first.field}: {first.detail}",
-            )
-        return result.records
 
     def canary(self) -> CanaryResult:
         """Answer without touching anything.

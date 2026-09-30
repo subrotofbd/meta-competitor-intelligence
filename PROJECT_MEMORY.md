@@ -846,3 +846,84 @@ Normalized ad persistence plus the historical ad/snapshot domain: the `ads` and 
 tables, append-only `ad_snapshots`, the `provider_active` / `not_seen_since` / `presumed_inactive`
 state machine, and **reordering the collection flow so the raw response is persisted before
 normalization**. Do not start without explicit human approval.
+---
+
+## Corrective note -- raw-before-normalize ordering (pre-S2.1, no new checkpoint)
+
+A narrowly scoped architectural correction to S1.3, made before S2.1 rather than during it.
+**Not a new checkpoint. No migration, no table, no schema change.**
+
+### The defect
+S1.3 left `MockProvider` normalizing the payload *inside* `fetch_page_ads`. A malformed record
+therefore raised `SchemaChanged` **before** `CollectionOrchestrator` reached its raw-persist step,
+so the payload was lost with the exception -- the one record we needed to look at was the one we
+could no longer see. `ProviderResult.records` was the field that made this possible: a provider that
+reads its own payload can refuse to return at all.
+
+### The flow
+- **Before:** provider fetch -> normalization (inside the provider) -> raw persistence.
+  A reading failure destroyed the evidence.
+- **After:** provider fetch -> persist `provider_run` + `raw_response` -> **commit** -> normalization.
+  A reading failure costs one record; the payload is already durable.
+
+### Transaction boundary
+`self._session.commit()` sits immediately between `_persist_provider_run(...)` and
+`normalize_payload(...)`, and is unconditional on every iteration of the cursor loop. No write
+transaction is held across a provider call, and no ORM attribute is read during one: the run's
+country and `PageRef` are read out of the session *before* the commit, because SQLAlchemy expires
+attributes on commit and a lazy load would otherwise reopen a transaction inside the fetch. There is
+no `rollback()` anywhere in the module, so nothing can undo a stored payload.
+
+### What changed
+- `ProviderResult.records` **removed**. No implementation populated it after the move, and a field
+  that must always be empty is a lie in the type. `ARCHITECTURE.md` updated to match.
+- `MockProvider` is provider-data-only: it serves the corpus verbatim and raises nothing.
+- `CollectionOrchestrator` calls `normalize_payload` and returns
+  `CollectionOutcome(records, errors, status)`. `status` is there because an empty record tuple means
+  three different things -- already terminal, nothing to report, or blocked -- and the caller does
+  not hold the row. A `PARTIAL` status is the existing vocabulary for "some of it arrived".
+- `_describe` and `_excerpt` keep `run.error_message` inside the column's `CHECK`, `repr`-escaped so
+  a provider cannot forge a log line through it.
+- Deleted dead code: `run_failed` / `last_error` threaded to a `pass` block.
+
+### Tests
+- New `backend/tests/test_collection_ordering.py`: 20 tests. The ordering itself is proven with a
+  recording session, because a sequence cannot be observed after the fact -- only a fake session can
+  see one while it happens. Integration tests then confirm the row lands, keeps the whole payload
+  including the unreadable record, survives the failed reading, and can be re-read afterwards.
+- **Mutation-verified.** Three deliberate regressions were each caught: removing the protecting
+  commit, moving normalization before the persist, and replacing partial success with
+  all-or-nothing. An earlier version of the ordering assertion was found passing for the wrong
+  reason (it accepted the unrelated RUNNING commit) and was fixed.
+- Rewrote the malformed-record tests in `test_mock_provider.py` to assert the provider serves the
+  payload untouched and the *reading* reports the error. Assertion strength was preserved or
+  improved everywhere; no test was weakened or deleted.
+- Full suite: **472 passed** (unit 129, contract 54, integration 101).
+
+### Reviews
+All three run; real findings fixed. Thermo-nuclear: dead code removed, one tautological test and a
+no-op monkeypatch deleted, two competing queue fakes merged, `_describe` given tests. Security:
+`run.error_message` was written unbounded and unescaped from a provider exception -- a 5000-character
+message would have raised `IntegrityError` from the `finally` that saves the run's status, leaving
+the row mutated but uncommitted. Accidental-data-loss: PASS, no migration or model-schema change;
+independently traced the unexpected-exception path and confirmed the committed raw response survives.
+
+### Known limitations (unchanged by this fix, or newly visible)
+- **The cursor walk has no page cap and no cycle detection.** A provider that repeats a
+  `next_cursor` would loop and grow `provider_runs`/`raw_responses` without bound. Unreachable with
+  `MockProvider`; must be closed before the first real provider.
+- **Records accumulate across a whole run** with no ceiling. Same reachability.
+- **A malformed record is now quieter, not louder.** It used to fail the run and log a warning; it
+  now yields `PARTIAL`, which the worker logs at info and marks the job complete. The signal lives
+  in `collection_runs.error_message` and `raw_responses`. Worth revisiting with the worker.
+- **`collection_runs` has no lease or heartbeat.** A crash after the raw commit but before the final
+  commit leaves a run permanently `RUNNING` with payloads already stored. A worker/lease decision.
+- **URL acceptance is not fetch safety.** Loopback, link-local and cloud-metadata addresses are
+  recorded; whether a URL may be *requested* is a decision for whoever requests it.
+- No real provider exists. No normalized ad is persisted yet. No API, no auth, no frontend.
+
+### Next checkpoint: S2.1 (unchanged)
+Normalized ad persistence plus the historical ad/snapshot domain: the `ads` and `ad_snapshots`
+tables, append-only `ad_snapshots`, the `provider_active` / `not_seen_since` / `presumed_inactive`
+state machine, and consuming `CollectionOutcome`. The raw-before-normalize ordering it needed is now
+in place. Do not start without explicit human approval.

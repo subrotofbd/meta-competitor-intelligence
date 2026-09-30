@@ -30,8 +30,9 @@ class AdDataProvider(Protocol):
     def fetch_page_ads(self, page: PageRef, country: str, *, cursor=None) -> ProviderResult: ...
     def canary(self) -> CanaryResult: ...   # cheap "is the provider still working" probe
 ```
-`ProviderResult` = `{raw: dict|list, records: list[RawAdRecord], next_cursor, request_meta, cost_estimate}`.
-The orchestrator stores `raw` before parsing, so a parser bug never loses data. A provider never touches the DB.
+`ProviderResult` = `{raw: dict|list, next_cursor, request_meta, cost_estimate}`. A provider returns
+provider data and nothing else — it does not read its own payload. The orchestrator stores `raw` and
+**commits it** before anything parses it, so a parser bug never loses data. A provider never touches the DB.
 Errors are typed (`RateLimited`, `Blocked`, `SchemaChanged`, `Transient`). `Blocked` stops the run; it is never
 worked around. `Transient` retries with capped exponential backoff + jitter.
 

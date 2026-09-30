@@ -21,6 +21,7 @@ from app.providers.ai.base import AIProvider
 from app.providers.ai.models import CopyAnalysisRequest
 from app.providers.data.base import AdDataProvider
 from app.providers.data.models import PageRef
+from app.providers.data.normalize import normalize_payload
 from app.services.media import LocalFsStore, content_key_for
 
 
@@ -39,7 +40,7 @@ def test_the_ad_provider_works_with_sockets_blocked(
 ) -> None:
     page = PageRef(provider_page_id="mock-page-0001", page_name="Aurora Kitchen Studio")
     result = ad_provider.fetch_page_ads(page, "IN")
-    assert result.records
+    assert normalize_payload(result.raw).records
     assert ad_provider.canary().ok is True
     assert ad_provider.capabilities().serves_commercial_ads is True
 
@@ -52,7 +53,7 @@ def test_a_full_cursor_walk_works_with_sockets_blocked(
     seen = 0
     while True:
         result = ad_provider.fetch_page_ads(page, "IN", cursor=cursor)
-        seen += len(result.records)
+        seen += len(normalize_payload(result.raw).records)
         cursor = result.next_cursor
         if cursor is None:
             break

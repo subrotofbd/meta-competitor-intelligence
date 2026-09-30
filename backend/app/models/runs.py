@@ -144,10 +144,14 @@ class CollectionRun(Base, UuidPrimaryKeyMixin, TimestampMixin, CountryCodeMixin)
     in more than one market, and the country is what scopes the history rules,
     so it belongs on the run and not only on `facebook_pages`.
 
-    `records_returned` counts what the provider *reported*. It is not a count of
-    new or changed ads: those are decided by comparing `content_hash` against
-    the previous snapshot, which is S2's work and must not be anticipated here
-    with a column that looks like it already knows.
+    `records_returned` counts the records the run *read* -- the ones that became
+    a `RawAdRecord`. It is therefore lower than what arrived whenever some record
+    could not be read, and the gap is exactly what the `PARTIAL` status and
+    `error_message` are for. It is not a count of new or changed ads: those are
+    decided by comparing `content_hash` against the previous snapshot, which is
+    S2's work and must not be anticipated here with a column that looks like it
+    already knows. How many records *arrived* is not recorded separately; the
+    raw responses hold all of them either way.
     """
 
     __tablename__ = "collection_runs"
