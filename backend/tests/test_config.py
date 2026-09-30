@@ -5,6 +5,8 @@ refusal to start in a configuration that would leak credentials in production.
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import timedelta
+from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
@@ -127,3 +129,86 @@ def test_get_settings_is_cached_and_resettable(
 
     get_settings.cache_clear()
     assert get_settings() is not first
+
+
+# ============================================================
+# Collection safety settings
+# ============================================================
+
+
+def test_the_collection_safety_defaults_are_operational_not_business_limits(
+    make_settings: Callable[..., Settings],
+) -> None:
+    """The defaults bound a run; they do not say how much a rival runs.
+
+    There is no product statement about ad volume anywhere, so a default that
+    encoded one would be inventing policy in a configuration file.
+    """
+    settings = make_settings()
+
+    assert settings.collection_max_records_per_run == 10_000
+    assert settings.collection_max_pages_per_run == 200
+    assert settings.collection_stale_run_timeout == timedelta(minutes=30)
+
+
+@pytest.mark.parametrize("duration", ["PT1M", "PT4M59S", "PT5M"])
+def test_a_stale_timeout_at_or_below_the_job_lease_is_refused(
+    make_settings: Callable[..., Settings], duration: str
+) -> None:
+    """A config typo here silently fails live runs, so it is a startup error.
+
+    The staleness check needs a *live* job lease, and a lease lasts five
+    minutes. Set the timeout lower and every worker doing an ordinary job has
+    its run marked `failed` underneath it: the page is re-collected
+    concurrently, and the worker's own commit then overwrites the recovery.
+
+    The durations are ISO-8601 because that is the only form pydantic accepts
+    for a `timedelta`; a bare number is a *parse* error, which would make this
+    test pass for the wrong reason. Asserting on the message pins which of the
+    two happened.
+    """
+    with pytest.raises(ValidationError) as raised:
+        make_settings(COLLECTION_STALE_RUN_TIMEOUT=duration)
+
+    assert "job lease" in str(raised.value), "rejected by parsing, not by the validator"
+
+
+def test_a_stale_timeout_above_the_job_lease_is_accepted(
+    make_settings: Callable[..., Settings],
+) -> None:
+    settings = make_settings(COLLECTION_STALE_RUN_TIMEOUT="PT30M")
+    assert settings.collection_stale_run_timeout == timedelta(minutes=30)
+
+
+def test_the_example_value_for_the_stale_timeout_is_one_that_starts(
+    make_settings: Callable[..., Settings],
+) -> None:
+    """`.env.example` has to hold a value the application actually accepts.
+
+    A bare number in the template would fail at startup for anyone who copied
+    it, and the first sign of that would be a stack trace during setup.
+    """
+    template = (Path(__file__).resolve().parents[2] / ".env.example").read_text(encoding="utf-8")
+    declared = next(
+        line.split("=", 1)[1].strip()
+        for line in template.splitlines()
+        if line.startswith("COLLECTION_STALE_RUN_TIMEOUT=")
+    )
+
+    assert make_settings(COLLECTION_STALE_RUN_TIMEOUT=declared).collection_stale_run_timeout
+
+
+@pytest.mark.parametrize(
+    "field", ["COLLECTION_MAX_RECORDS_PER_RUN", "COLLECTION_MAX_PAGES_PER_RUN"]
+)
+@pytest.mark.parametrize("value", ["0", "-1"])
+def test_a_non_positive_ceiling_is_refused(
+    make_settings: Callable[..., Settings], field: str, value: str
+) -> None:
+    """Zero would halt every run after its first page and blame the provider.
+
+    A ceiling of zero is not a strict policy, it is a product that collects
+    nothing while reporting `record_limit` for every page.
+    """
+    with pytest.raises(ValidationError):
+        make_settings(**{field: value})

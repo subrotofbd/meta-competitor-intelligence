@@ -36,6 +36,27 @@ provider data and nothing else — it does not read its own payload. The orchest
 Errors are typed (`RateLimited`, `Blocked`, `SchemaChanged`, `Transient`). `Blocked` stops the run; it is never
 worked around. `Transient` retries with capped exponential backoff + jitter.
 
+### Collection safety
+A cursor walk has three ways to end badly, all of which would otherwise leave a page permanently
+uncollectible. Each has one documented stop:
+
+- **Cursor cycle.** A cursor already followed in this execution is not followed again. The walk
+  reports `error_type = cursor_cycle` and ends `partial`. Cursors are opaque: only equality is
+  compared, and no provider-specific cursor semantics are assumed.
+- **Record ceiling.** `collection_max_records_per_run` (default 10,000) bounds what one run holds in
+  memory. It stops the walk *before* the next fetch, so it never reports a limit the provider did
+  not cause, and it never truncates a page — a single page larger than the ceiling is stored and read
+  whole. The run ends `partial` with `error_type = record_limit`. This is a memory bound, not a
+  statement about any competitor's ad volume.
+- **Stale runs.** A `running` run is abandoned only when three signals agree: it is `running`, no job
+  for it holds a live lease, and it has added no provider call for `collection_stale_run_timeout`
+  (default 30 minutes, which must exceed the 5-minute job lease). The third signal is what keeps a
+  slow run from being taken from a live worker. Recovery marks such a run `failed` and **never
+  `complete`** — elapsed time is not evidence that work was finished — which is what returns the page
+  to the scheduler, since `pending`/`running` runs block a new one. It touches no `provider_run` or
+  `raw_response`: a run that died at page nine still collected eight pages of evidence, and that
+  evidence is the only copy.
+
 ## Data model (slice 1 tables)
 Identity: `users`(role admin/analyst/viewer), `settings`, `audit_logs`.
 Tracking: `competitors`, `facebook_pages`(page_id, country, tracking_frequency, is_tracked).

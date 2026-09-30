@@ -13,17 +13,32 @@ layer and no framework.
 
 from __future__ import annotations
 
+from datetime import timedelta
 from enum import StrEnum
 from functools import lru_cache
 from typing import Self
 
-from pydantic import SecretStr, field_validator, model_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # psycopg 3 only. A bare `postgresql://` URL resolves to psycopg2 under
 # SQLAlchemy, which this project does not use, so it is rejected rather than
 # silently producing a confusing driver error at first connect.
 _REQUIRED_DSN_SCHEME = "postgresql+psycopg://"
+
+#: How long a worker holds a job lease. Mirrored from
+#: `app.services.jobs.DEFAULT_LEASE_DURATION` rather than imported, because
+#: `core` sits at the bottom of the dependency graph and must not import a
+#: service to read one number. The staleness check below compares against it, so
+#: a divergence would be caught at startup rather than at 3am.
+_DEFAULT_LEASE_DURATION = timedelta(minutes=5)
+
+#: Bounds on one collection run. See the fields on `Settings` for what each is
+#: for and why neither is a product statement. Defined here so the service layer
+#: and the settings share one number rather than two that can drift.
+DEFAULT_COLLECTION_MAX_RECORDS_PER_RUN = 10_000
+DEFAULT_COLLECTION_MAX_PAGES_PER_RUN = 200
+DEFAULT_COLLECTION_STALE_RUN_TIMEOUT = timedelta(minutes=30)
 
 
 class AppEnv(StrEnum):
@@ -80,6 +95,50 @@ class Settings(BaseSettings):
     # credential leak in production -- blocked by the validator below.
     database_echo: bool = False
 
+    # ---- Collection safety settings -------------------------------------
+    #
+    # Operational bounds, not product policy. None of these says anything about
+    # how many ads a competitor "should" be running: there is no such number in
+    # the product, and putting one in a config file would be a business claim
+    # dressed as a setting. They exist because an unbounded collection run has
+    # failure modes that end with data we cannot get back. The reasoning lives
+    # once, in ARCHITECTURE.md under "Collection safety".
+
+    #: How many records one run reads across all its pages before it stops
+    #: walking. Counts records *attempted*, readable or not, because a provider
+    #: serving only unreadable records would otherwise never move this number.
+    #:
+    #: Bounds accumulation across pages. It does **not** bound what one page may
+    #: contain: a single page larger than this is still stored and still read
+    #: whole, because the raw response is the evidence and dropping readable
+    #: records to satisfy a memory bound would be the wrong trade. Use
+    #: `collection_max_pages_per_run` to bound page count, not this.
+    collection_max_records_per_run: int = Field(
+        default=DEFAULT_COLLECTION_MAX_RECORDS_PER_RUN, gt=0
+    )
+
+    #: How many provider pages one run may fetch before it stops walking.
+    #:
+    #: The third independent guard, and the only one that survives a provider
+    #: offering nothing: a provider that returns an empty or wholly unreadable
+    #: page with a fresh cursor each time never repeats a cursor (so the cycle
+    #: guard never fires) and never grows the record count (so the record
+    #: ceiling never fires), and would otherwise be called for ever, committing
+    #: a row each time. Two hundred pages is far above any real page and far
+    #: below anything that troubles a database.
+    collection_max_pages_per_run: int = Field(default=DEFAULT_COLLECTION_MAX_PAGES_PER_RUN, gt=0)
+
+    #: How long a collection run may show no sign of progress before it is
+    #: treated as abandoned. A run is only eligible when it is `running`, no job
+    #: for it holds a live lease, **and** it has added no provider call in this
+    #: long -- so all three must agree, and a slow run that is still making
+    #: progress is never taken from a live worker.
+    #:
+    #: Validated below against the job lease. A value at or under the lease
+    #: would make every legitimately long run look abandoned, which is a
+    #: config typo that silently fails runs, so it is a startup error.
+    collection_stale_run_timeout: timedelta = DEFAULT_COLLECTION_STALE_RUN_TIMEOUT
+
     @field_validator("database_url")
     @classmethod
     def _require_psycopg_dsn(cls, value: SecretStr) -> SecretStr:
@@ -110,6 +169,26 @@ class Settings(BaseSettings):
             raise ValueError(
                 "database_echo=true logs SQL and bound parameters; "
                 "it is not allowed when app_env=prod"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _refuse_a_stale_timeout_below_the_job_lease(self) -> Self:
+        """A run is declared abandoned after `collection_stale_run_timeout`.
+
+        The signal that has to agree is a *live* job lease, and a lease lasts
+        five minutes. A staleness timeout at or under that would mean a worker
+        doing a perfectly ordinary job had its run marked `failed` underneath
+        it -- the page re-collected concurrently, and the worker's own commit
+        then overwrites the recovery. That is a config typo silently losing runs,
+        so it is refused at startup rather than discovered in production.
+        """
+        if self.collection_stale_run_timeout <= _DEFAULT_LEASE_DURATION:
+            raise ValueError(
+                "collection_stale_run_timeout must exceed the job lease "
+                f"({int(_DEFAULT_LEASE_DURATION.total_seconds())}s), or a worker "
+                "mid-run will have its run marked failed; got "
+                f"{int(self.collection_stale_run_timeout.total_seconds())}s"
             )
         return self
 

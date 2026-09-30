@@ -7,8 +7,18 @@ The worker:
 2. Loops forever, claiming jobs up to a batch limit
 3. Executes each job based on its kind
 4. Marks jobs complete or failed with typed error info
-5. Handles lease extension for long-running jobs
+5. Reconciles abandoned collection runs on each idle tick
 6. Backs off when the queue is empty
+
+## Why recovery lives here
+
+A collection run whose worker died is invisible from the queue alone: the job is
+re-leased and retried, but the *run* stays `running` for ever, and a `running`
+run stops `schedule_collection` from ever starting another -- so the page is
+silently uncollectible with nothing logged anywhere. The worker is the only
+process that knows a run went missing, which makes its idle tick the natural
+place to notice. Recovery is cheap, is bounded per pass, and does nothing at all
+when there is no work, so running it on the backoff path costs nothing.
 """
 
 from __future__ import annotations
@@ -64,7 +74,9 @@ def main() -> int:
                 claimed = job_queue.claim(limit=5, worker_id=worker_id)
 
                 if not claimed:
-                    # No work - back off briefly
+                    # No work. This is also the moment a run is most likely to
+                    # have been abandoned, so reconcile before sleeping.
+                    _reconcile(orchestrator, worker_id)
                     time.sleep(2)
                     continue
 
@@ -92,6 +104,26 @@ def main() -> int:
         logger.info("Worker stopped")
 
     return 0
+
+
+def _reconcile(orchestrator, worker_id: str) -> None:
+    """Hand back collection runs whose worker never came back.
+
+    Never fatal. A failure here means an abandoned run stays abandoned, which is
+    the state this exists to fix -- it is strictly better to try again on the
+    next tick than to let the exception escape and stall the whole loop.
+    """
+    try:
+        recovered = orchestrator.recover_stale_runs()
+    except Exception:
+        logger.exception("Worker %s could not reconcile stale runs", worker_id)
+        return
+    for run_id in recovered:
+        logger.warning(
+            "Recovered abandoned collection run %s; it is marked failed and can be"
+            " rescheduled. Any response it had already stored is kept.",
+            run_id,
+        )
 
 
 def execute_job(

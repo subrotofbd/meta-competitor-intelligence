@@ -927,3 +927,110 @@ Normalized ad persistence plus the historical ad/snapshot domain: the `ads` and 
 tables, append-only `ad_snapshots`, the `provider_active` / `not_seen_since` / `presumed_inactive`
 state machine, and consuming `CollectionOutcome`. The raw-before-normalize ordering it needed is now
 in place. Do not start without explicit human approval.
+
+---
+
+## S1.2 hardening -- cursor safety, record safety, run recovery
+
+A small hardening checkpoint on the completed S1.2 orchestration. **No migration, no table, no
+schema change.** The raw-before-normalize ordering from the previous commit is untouched and still
+proven by the regression tests in `test_collection_ordering.py`.
+
+### 1. Cursor cycle protection
+A cursor already followed in one execution is not followed again. The guard sits at the **top** of
+the walk, before the fetch, so the repeated page is never requested. A cursor is opaque: only
+equality is compared, and no provider-specific cursor semantics are assumed or invented. The walk
+ends `partial` with `error_type = cursor_cycle`, and the cursor is named in the message. A
+20-cursor walk is followed to the end, so the guard cannot fire on a provider that is behaving.
+
+### 2. Two explicit ceilings, not one
+The first draft counted only *readable* records and a review proved the walk was still unbounded:
+a provider serving well-formed **unreadable** records never grew that counter, and a provider
+serving **empty** pages with a fresh cursor never grew it or repeated a cursor. Both holes are
+closed by two independent guards, each a documented `Settings` field:
+
+- `collection_max_records_per_run` (default 10,000) -- counts **attempts**, readable or not.
+- `collection_max_pages_per_run` (default 200) -- the only guard a provider offering nothing can
+  escape. Checked before the fetch.
+
+Both stop the walk *before* the next fetch, so neither ever reports a limit the provider did not
+cause, and neither truncates a page: a single page larger than the ceiling is stored and read
+whole, because the raw response is the evidence. Neither is a product statement about any
+competitor's ad volume -- the reasoning lives once, in `ARCHITECTURE.md` under "Collection safety".
+The architecture defined **no** maximum record count, so these are a newly documented configuration
+seam, not an existing contract implemented.
+
+### 3. Stale collection-run recovery
+`CollectionOrchestrator.recover_stale_runs()`, called from the worker's idle tick. A run is
+recovered only when it is `running`, **no** job for it holds a live lease, **and** it has added no
+provider call within `collection_stale_run_timeout` (default 30 min, validated at startup to
+exceed the 5-minute job lease). The third signal is what makes it safe: a slow run keeps committing
+`provider_runs` rows, and the lease alone cannot tell a slow run from a dead one because the worker
+does not extend leases.
+
+- It **never** marks a run `complete`. Elapsed time is not evidence that work was finished.
+- It only moves `running` -> `failed`, which is what hands the page back -- `schedule_collection`
+  refuses to start a run while one is `pending` or `running`, so an abandoned run otherwise makes
+  its page permanently uncollectible.
+- The status guard is repeated in the `WHERE` of the write, so a run a live worker finished
+  in between is **not** overwritten; the rowcount says so and it is left out of the result.
+- It touches no `provider_run` and no `raw_response`. A run that died at page nine still collected
+  eight pages of evidence, and that is the only copy.
+
+### 4. Two defects found by review, in code the previous checkpoint shipped
+- **`_excerpt` could exceed the column limit.** It budgeted on the *input* length, but `repr`
+  doubles a backslash and quadruples a control character, so a provider-supplied cursor could
+  produce a string 3x over the `CHECK` -- raising `IntegrityError` from the `finally` that saves
+  the run's status, exactly the failure `_excerpt` exists to prevent. The bound is now applied to
+  the rendered string.
+- **Internal exception text was persisted verbatim** to `error_message`, which
+  `get_run_error()` hands to a caller. Real text carries the failed SQL, the database host and
+  user, and an absolute filesystem path including the OS username. An unexpected internal failure
+  now stores a fixed pointer; the detail goes to the worker log. A *typed provider* error still
+  keeps its own message, because that text is the provider's and says what a reader needs.
+
+Also fixed: `_excerpt` did not escape on the short path, so a provider `Blocked` message could
+forge a log line; the `stale_run_timeout`-vs-lease invariant is now enforced at startup; ceilings
+reject a non-positive value; recovery is batched and rolls back on error; `finished_at` is clamped
+so clock skew cannot trip a CHECK; the `error_type` vocabulary is now one block of constants
+instead of a dict plus two bare literals.
+
+### Tests
+New `backend/tests/test_collection_hardening.py` (36 tests). Every guard is **mutation-verified**:
+disabling the cycle guard, the page ceiling, the record ceiling, the recovery `WHERE` guard, the
+`_excerpt` bound, or the internal-error redaction each fails the suite. Two false passes were found
+and fixed during that process -- an ordering assertion that accepted an unrelated commit, and a
+race test that rebuilt the guarded `UPDATE` in the test body and therefore proved its own copy.
+`test_config.py` gained 6 tests, including one that the `.env.example` value actually parses (it
+did not: only ISO-8601 durations are accepted, so `1800` would have failed at startup).
+
+Full suite: **519 passed** (unit 139, contract 54, integration 115). Baseline was 472.
+
+### Reviews
+All three run; genuine findings fixed. Accidental-data-loss: PASS, and it independently traced the
+unchanged commit-before-normalize invariant. Thermo-nuclear: the two ceilings not composing was the
+real finding, plus the unreachability of recovery (now wired into the worker). Security: the
+`_excerpt` expansion and the information disclosure were both rated highest and are fixed.
+
+### Known limitations
+- **No per-call provider timeout exists.** A worker alive but blocked inside one
+  `fetch_page_ads` for longer than the stale timeout has written no recent `provider_run`, so a
+  live run can still be marked `failed`; the page is re-collected concurrently and the worker's
+  own commit then overwrites the recovery. Closing this needs a provider-side timeout or a run
+  heartbeat, both of which need a real provider.
+- **The worker does not extend job leases**, so a legitimately long walk loses its lease while
+  still running. The progress signal covers this, but it is a queue gap.
+- **Recovery's job lookup has no reverse index** -- `jobs.payload ->> 'collection_run_id'` is a
+  scan. The right fix is a nullable `collection_run_id` column on `jobs`, which is a migration and
+  so out of scope. Batches are bounded to limit the cost.
+- **Recovery does not fail the job** it declares abandoned; a re-claimed job wastes one attempt
+  before being released.
+- **A malformed record is quieter than before S1.3's reordering** -- `partial` logs at info.
+- **URL acceptance is not fetch safety.** No real provider exists. No normalized ad is persisted
+  yet. No API, no auth, no frontend.
+
+### Next checkpoint: S2.1 (unchanged)
+Normalized ad persistence plus the historical ad/snapshot domain: the `ads` and `ad_snapshots`
+tables, append-only `ad_snapshots`, the `provider_active` / `not_seen_since` / `presumed_inactive`
+state machine, and consuming `CollectionOutcome` -- whose `stopped_reason` now tells S2.1 why a
+run was short. Do not start without explicit human approval.

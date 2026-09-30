@@ -354,11 +354,33 @@ def test_a_provider_error_long_enough_to_break_the_commit_is_excerpted() -> None
     assert "truncated" in excerpt
 
 
-def test_a_short_error_is_kept_verbatim() -> None:
-    """The common case must not be mangled by the safety net."""
+def test_a_short_error_is_escaped_rather_than_returned_raw() -> None:
+    """Short input is still escaped. This used to assert the opposite.
+
+    Returning short text unchanged meant a provider could put a newline into
+    `run.error_message` and have it printed as a forged line by anything that
+    logs the column. The quotes `repr` adds are the visible cost of closing that;
+    the message is still readable, which is what the column is for.
+    """
     assert _excerpt("blocked: the provider refused the request") == (
-        "blocked: the provider refused the request"
+        "'blocked: the provider refused the request'"
     )
+
+
+def test_excerpt_stays_inside_the_column_even_when_repr_expands_the_text() -> None:
+    """The bound is applied to the rendered string, not the input.
+
+    `repr` doubles a backslash and quadruples a control character, so budgeting
+    on the input length produces a string several times over the limit -- which
+    trips the column's `CHECK` and raises `IntegrityError` from the `finally`
+    that saves the run's status. That is precisely the outcome this function
+    exists to prevent, and it was reachable from a provider-supplied cursor.
+    """
+    for hostile in ("\\" * 3000, "\x01" * 3000, "\t" * 3000, "\n" * 3000, "x" * 9000):
+        excerpt = _excerpt(hostile)
+        assert len(excerpt) <= ERROR_MESSAGE_LIMIT, repr(hostile[:8])
+        assert "\n" not in excerpt, repr(hostile[:8])
+        assert "\r" not in excerpt, repr(hostile[:8])
 
 
 # ============================================================
@@ -590,20 +612,19 @@ def test_the_queue_seam_is_untouched_by_a_run(db_session: Session) -> None:
 
 
 def test_the_orchestrator_keeps_the_signature_the_worker_depends_on() -> None:
-    """Constructor unchanged, and the new return value is additive.
+    """Only the positional contract, because only that is a dependency.
 
-    The worker calls `execute_collection_job(run_id)` and ignores what comes
-    back, so widening `None` to a `CollectionOutcome` costs it nothing. Pinned
-    because a future refactor that starts raising, or takes the queue, would
-    break the worker in a way no provider-level test would notice.
+    The composition root builds the orchestrator from the session factory, so it
+    never passes the safety settings positionally -- they are keyword-only with
+    defaults, added by later checkpoints, and asserting their names here would
+    fail on the next one for no reason a reader would care about.
     """
-    assert list(inspect.signature(CollectionOrchestrator.__init__).parameters) == [
-        "self",
-        "session",
-        "provider",
-        "job_queue",
-    ]
+    parameters = inspect.signature(CollectionOrchestrator.__init__).parameters
+    assert [
+        name
+        for name, parameter in parameters.items()
+        if parameter.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
+    ] == ["self", "session", "provider", "job_queue"]
 
     execute = inspect.signature(CollectionOrchestrator.execute_collection_job)
     assert list(execute.parameters) == ["self", "run_id"]
-    assert execute.return_annotation == "CollectionOutcome"

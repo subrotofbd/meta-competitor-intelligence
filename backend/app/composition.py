@@ -22,6 +22,7 @@ from datetime import datetime, timedelta
 
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.db.session import get_session_factory
 from app.providers.ai.base import AIProvider
 from app.providers.ai.mock import MockAIProvider
@@ -128,6 +129,10 @@ def build_collection_orchestrator(
 ) -> tuple[CollectionOrchestrator, Session]:
     """Build a collection orchestrator with all its dependencies.
 
+    The two collection safety settings come from `Settings`, so each is one
+    value in one place and overridable per environment, rather than a constant
+    buried in a service.
+
     Returns the orchestrator AND the session it uses. The caller is responsible
     for closing the session.
 
@@ -141,5 +146,12 @@ def build_collection_orchestrator(
     provider = build_ad_provider(build_mock_pages())
     job_queue = build_job_queue(lease_duration=lease_duration, max_attempts=max_attempts)
 
-    orchestrator = _build(session, provider, job_queue)
+    settings = get_settings()
+    orchestrator = _build(
+        session,
+        provider,
+        job_queue,
+        max_records=settings.collection_max_records_per_run,
+        stale_run_timeout=settings.collection_stale_run_timeout,
+    )
     return orchestrator, session
