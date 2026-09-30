@@ -29,10 +29,11 @@ configure_logging(settings)
 
 target_metadata = Base.metadata
 
-# S1.1: import the model modules here so autogenerate sees the tables, e.g.
-#     from app.db import models
-# Until then the metadata is intentionally empty and autogenerate emits no
-# table diffs.
+# Registering the models is what fills `Base.metadata` with the tables, and an
+# empty metadata is why autogenerate would otherwise see no drift at all. The
+# imported names are unused here on purpose -- the import *is* the effect -- so
+# the warning is silenced rather than faked with a dummy assignment.
+from app import models  # noqa: E402,F401
 
 # Compare column types as well as names/columns, so a changed type is caught
 # instead of silently ignored.

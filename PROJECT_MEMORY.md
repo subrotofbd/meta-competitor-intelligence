@@ -472,3 +472,145 @@ NOT started. Requires explicit human approval.
 
 ### Git
 Committed as `feat: establish provider and service contracts`. No remote added, nothing pushed.
+
+---
+
+## 2026-09-30, Checkpoint S1.1 -- Domain Schema Foundation (COMPLETE)
+
+Approved by the user with the scope decision: **5 tables only — no identity (users/settings/audit_logs)**.
+The 15-table note in the S0.3 entry is superseded; `users`/`settings`/`audit_logs` are deferred to a
+post-S3 auth checkpoint and recorded here as a deliberate deferral, not an omission.
+
+### Files created (3)
+- `backend/app/models/mixins.py` -- shared schema vocabulary: `UuidId`, `UtcDateTime`,
+  `ISO_ALPHA_2_CHECK`, `UuidPrimaryKeyMixin`, `TimestampMixin`, `CountryCodeMixin`,
+  `not_blank()`, `at_most()`. Documents the autogenerate inline-check trap explicitly.
+- `backend/app/models/tracking.py` -- `Competitor`, `FacebookPage`.
+- `backend/app/models/runs.py` -- `CollectionRunStatus`, `ProviderRunStatus`,
+  `_stored_enum()`, `CollectionRun`, `ProviderRun`, `RawResponse`.
+
+### Files modified (4)
+- `backend/app/models/__init__.py` -- rewritten as the S0.1 charter with per-checkpoint table
+  assignment and the identity-trio deferral note. Re-exports that register tables on `Base.metadata`.
+- `database/migrations/env.py` -- adds `from app import models` so autogenerate sees the tables.
+- `backend/tests/conftest.py` -- adds `db_session` fixture: a session bound to a connection wrapped
+  in an outer transaction that is always rolled back. Nothing is ever committed, so there is no
+  cleanup `DELETE` to get wrong and no path by which a failing test can leave rows in the
+  development database.
+- `database/migrations/versions/0002_collection_domain.py` -- the single S1.1 migration,
+  extending `0001_pg_trgm`.
+
+### Database migration
+- Revision **`0002_collection_domain`**, `down_revision = "0001_pg_trgm"`. Single linear head,
+  no branches.
+- `alembic current` -> `0002_collection_domain (head)`; `alembic heads` -> `0002_collection_domain (head)`.
+- `alembic check` -> "No new upgrade operations detected." (exit 0) -- zero drift.
+- `pg_trgm` 1.6 still installed and intact.
+- `downgrade` renders complete, correctly ordered SQL offline without executing it: trigger dropped
+  before function, tables dropped deepest-first, `alembic_version` updated to `0001_pg_trgm`.
+  **Never executed** (issues `DROP`s; checkpoint rules require consent).
+
+### Tables (5, exactly the S1.1 assignment)
+| Table | Purpose | Key decisions |
+|---|---|---|
+| `competitors` | The tracked brand | Name non-blank, UUID PK, `created_at`/`updated_at` from DB clock |
+| `facebook_pages` | A page a competitor owns | `page_id` unique **globally** (not per competitor), `url` http(s) or NULL, country ISO alpha-2 upper case, `tracking_frequency` free text |
+| `collection_runs` | One attempt to collect one page in one country from one provider | **Owner of `provider` and `data_origin`** (not repeated below), status enum `pending/running/complete/partial/failed`, `records_returned >= 0`, `finished_at >= started_at` |
+| `provider_runs` | One HTTP call inside a run | Status enum `running/succeeded/failed/blocked`, `request_meta` JSONB, `next_cursor`, `http_status 100..599`, cost triple all-or-nothing with method, `cost_amount >= 0`, `finished_at >= started_at` |
+| `raw_responses` | The raw provider payload, before parsing | `provider_run_id` UNIQUE, `payload` JSONB (untyped), `payload_hash` **computed by a `BEFORE INSERT OR UPDATE` trigger** (not application, not generated column) |
+
+### Constraints and design rules enforced
+- **Single-parented chain, no ambiguous FKs:** `competitors -> facebook_pages -> collection_runs -> provider_runs -> raw_responses`. Every row has exactly one parent; a page belongs to one competitor; an ad cannot belong to two.
+- **All FKs `ON DELETE RESTRICT`, no CASCADE anywhere** -- collected data cannot be re-acquired; deletion must be deliberate. Verified live: all 4 FKs `confdeltype='r'`.
+- **`data_origin` and `provider` stored once on `collection_runs` only**; `provider_runs`/`raw_responses` inherit via FK. Prevents three copies that can disagree. `evidence_class` appears in **no S1.1 table** (no displayable collected values until S2.1). Deviation from ARCHITECTURE's parenthetical, documented.
+- **`page_id` stored once, `UNIQUE(page_id)` is global** -- the per-composite version would let one page belong to two competitors, making every ad's competitor ambiguous.
+- **Enums as `VARCHAR` + named `CHECK`** via `sa.Enum(..., native_enum=False, create_constraint=True, values_callable=...)` -- values not names (`official_api`, not `OFFICIAL_API`); one source of truth = Python `StrEnum`; extensible by ordinary migration.
+- **No `cursor` column on `collection_runs`** -- a per-page run's resume point is exactly its last `provider_runs.next_cursor`; a second copy would be two values to keep in step.
+- **`tracking_frequency` free text** -- scheduling is S1.2's decision.
+- **`records_returned` is the only count** -- derivable counts are duplication; new/changed ads are S2.
+- **All `CheckConstraint`s in `__table_args__`, never inline** -- Alembic autogenerate silently omitted every inline check while reporting no drift. Discovered by inspecting the generated migration; locked in by `test_every_check_constraint_is_visible_to_alembic`.
+- **Timestamps:** `UtcDateTime = DateTime(timezone=True)`, `server_default=func.now()`; `updated_at` moves on ORM writes only (documented limitation).
+- **`UuidId = Uuid(as_uuid=True)` shared alias** for PK and all FK columns (bare `ForeignKey` gives SQLAlchemy no type to infer -> `NullType` DDL error).
+- **Model classes subclass `Base` from `app.db.base`** -- omitting it silently registers nothing.
+- **`error_message` bounded to 2000 chars** via `at_most()`.
+
+### Trigger for `payload_hash`
+A `GENERATED ALWAYS` column was the obvious choice and **does not work**: PostgreSQL requires a generated expression to be immutable, and `jsonb::text` is not. A column `DEFAULT` referencing another column also fails: `cannot use column reference in DEFAULT expression`.
+
+The migration creates `raw_response_payload_hash()` and `raw_responses_payload_hash_trg` (`BEFORE INSERT OR UPDATE`). Verified live:
+- Computes on insert.
+- Recomputes on payload mutation.
+- 64 hex chars, reproducible via `encode(sha256(convert_to(payload::text,'UTF8')),'hex')`.
+- Hash covers the *stored* form (jsonb normalises key order, whitespace, duplicate keys).
+
+### Indexes (3, one per named access pattern)
+| Index | Serves |
+|---|---|
+| `ix_facebook_pages_competitor_id` | GET /competitors/{id}/pages |
+| `ix_collection_runs_facebook_page_id` | Latest run for a page and country (`not_seen_since` rule) |
+| `ix_provider_runs_collection_run_id` | The calls belonging to a run |
+
+**No composite `(page, country, started_at)` index** -- S2 writes the query and measures before an index is built for it.
+
+### Test suite (3 new test modules, 164 S1.1-specific tests)
+| Module | Scope |
+|---|---|
+| `backend/tests/test_models.py` | Unit/metadata: exactly 5 tables registered; scope guards against early `ads`; no business logic; provenance on one table only; no `evidence_class`; every FK RESTRICT; every table has UUID PK + timestamps; enum checks contain values; no column-level checks; indexes are exactly the 3 declared; `payload_hash` is plain `String(64)`; `payload` is JSONB untyped. |
+| `backend/tests/test_schema_integration.py` | Integration (live PG, rollback-per-test session): migration applies + single head; pg_trgm intact; 5 tables exist; `compare_metadata` no diff; live checks == metadata checks; FK rejects orphan; deleting a competitor with a page refused; duplicate `page_id` refused globally; declared indexes exist; payload hash DB-computed 64 hex + reproducible in SQL; hash changes on payload mutation; payload round-trips losslessly (non-ASCII, nesting, list, numbers); timestamps DB-clock and tz-aware; `updated_at` moves on ORM update; unknown status/origin refused; country upper-case alpha-2; `finished_at` cannot precede `started_at`; `records_returned >= 0`; cost all-or-nothing; `http_status 100..599`; one raw response per provider run; downgrade SQL rendered offline. |
+| `backend/tests/test_migrations.py` (updated) | Linear history assertion updated; DSN search tightened to `postgresql://` patterns. |
+
+### Validation gates (all pass)
+| Gate | Command | Result |
+|---|---|---|
+| Lock | `uv lock --check` | exit 0 |
+| Lint | `uv run ruff check .` | All checks passed |
+| Format | `uv run ruff format --check .` | 56 files already formatted |
+| Types | `uv run mypy backend/app` | Success, no issues in 29 source files |
+| Unit tests | `uv run pytest -m unit -q` | 97 passed |
+| Integration tests | `uv run pytest -m integration -q` | 67 passed |
+| Full suite | `uv run pytest -q` | 398 passed |
+| Migrations | `uv run alembic current` / `heads` / `check` | `0002_collection_domain (head)`, single head, zero drift |
+| Compose | `docker compose config -q` | exit 0 |
+| Compose ps | `docker compose ps` | healthy, PostgreSQL 16.15 |
+
+### Thermo-nuclear code quality review (self-applied)
+No findings:
+- **No duplicated schema**: CHECK text duplicated between model and migration is inherent to Alembic (frozen historical record); migration cannot import from models without mutability.
+- **No unnecessary wrappers**: `mixins.py` is 4 utilities; `_stored_enum` is the one place the enum mapping lives.
+- **No business logic in models**: `test_models_declare_no_methods_or_properties` asserts 0 routines on all 5 mapped classes.
+- **No giant files**: models split into `mixins.py`, `tracking.py`, `runs.py`; migration is one file.
+- **FK ownership correct**: chain is single-parented, all RESTRICT.
+- **No speculative tables**: exactly the 5 tables assigned to S1.1.
+- **No migration duplication**: one migration extending `0001_pg_trgm`.
+- **No index overengineering**: exactly 3 indexes for 3 named access patterns.
+- **No cross-layer imports**: models import only `db.base`, `mixins`, `provenance` (enum source), `tracking` (for FK).
+
+### Secure-code-guardian review (self-applied)
+No findings:
+- No credentials in migration (docstrings mention "password-hash" as future context, not a value).
+- No secrets in fixtures (fixtures scanned; only mock `media.key` strings like `mock-media-0001-a`).
+- No unsafe dynamic SQL: the two parametrised `text()` calls use table/column names from test parametrisation (code, not input) and bound parameters for all values.
+- No sensitive values logged: no logging of payloads, credentials, or DSNs.
+
+### Known limitations
+- **Identity tables deferred**: `users`/`settings`/`audit_logs` do not exist. The S0.3 entry's "all 15 tables" note is superseded here. The deferral is deliberate and recorded.
+- **`jobs` table is S1.2's deliverable** -- creating it now would be speculative and invoke `PostgresJobQueue` before it exists.
+- **`evidence_class` does not exist in S1.1** -- arrives with `ads` in S2.1 where there is a value to qualify.
+- **No state machine implemented** -- status vocabularies exist, but transitions are S1.2.
+- **ORM `updated_at` only moves on ORM writes** -- a bulk raw `UPDATE` would not bump it; no code path does this today.
+- **`alembic downgrade` never executed** -- issues `DROP`s requiring explicit consent. Reversibility asserted structurally + rendered offline only.
+- **`docker compose config` prints the resolved password** to stdout -- never paste its output anywhere.
+- **`.ruff_cache` writes fail with os error 5** -- gitignored, no repo impact.
+- **`postgres:16-alpine` pins major only** -- 16.15 today.
+
+### Open decisions needing human input
+- Gate `/docs`, `/docs/oauth2-redirect`, `/openapi.json` on `app_env` in `backend/app/main.py` (3 lines, currently unauthenticated).
+- Replace placeholder git identity `Brandset Dev <dev@brandset.local>` before any push.
+- S4 real-data path: under strict no-bypass rules, `meta-ads-collector`-style collection is out of bounds. India commercial ads likely narrow to Apify or manual import. Open: D1 (aggressiveness), D2 (wrapper vs own client), D3 (do India commercial ads actually appear in the public library), plus AI key choice and a sample Indian Page URL.
+
+### Next checkpoint: S1.2
+Collection orchestration: `jobs` table + `PostgresJobQueue` implementation + the scheduler that enqueues per-page/country runs. The `collection_runs` schema was designed so a run is exactly what a `SKIP LOCKED` lease means. **Not started without explicit human approval.**
+
+### Git
+`git status` clean. Only S1.1 files changed (see above). `git diff --check` clean. Commit message:
+`feat: establish collection domain schema`. No remote, no push.

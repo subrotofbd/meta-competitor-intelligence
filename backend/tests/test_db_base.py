@@ -18,9 +18,19 @@ from app.db.base import Base
 pytestmark = pytest.mark.unit
 
 
-def test_metadata_is_empty_in_s02() -> None:
-    """S0.2 creates no domain tables. A non-empty list here means scope creep."""
-    assert Base.metadata.tables == {}
+def test_the_metadata_holds_exactly_the_s11_tables() -> None:
+    """The base is the single registry every table joins, and it holds only S1.1's.
+
+    S0.2 asserted this metadata was empty. S1.1's own scope check lives in
+    `test_models`, where it can also compare the table names against the
+    checkpoint charter; what is pinned here is narrower and about the *base*: the
+    convention is still attached, and no table arrived from outside the five the
+    migration creates.
+    """
+    from tests.test_models import S11_TABLES
+
+    assert set(Base.metadata.tables) == S11_TABLES
+    assert Base.metadata.naming_convention, "the naming convention must survive S1.1"
 
 
 def test_convention_covers_every_constraint_kind() -> None:

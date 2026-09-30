@@ -41,9 +41,20 @@ def test_history_has_exactly_one_head() -> None:
     assert len(_script_directory().get_heads()) == 1
 
 
-def test_s02_contains_exactly_one_revision() -> None:
-    revisions = [revision.revision for revision in _script_directory().walk_revisions()]
-    assert revisions == ["0001_pg_trgm"]
+def test_history_is_a_single_linear_chain() -> None:
+    """One revision per checkpoint, each naming exactly one parent.
+
+    S0.2 asserted a single revision. S1.1 adds the second, so the assertion
+    becomes the property that survives it: a chain with no branch and no gap, so
+    `alembic upgrade head` from `base` reaches the whole schema in order.
+    """
+    script = _script_directory()
+    assert [revision.revision for revision in script.walk_revisions()] == [
+        "0002_collection_domain",
+        "0001_pg_trgm",
+    ]
+    assert script.get_base() == "0001_pg_trgm"
+    assert list(script.get_heads()) == ["0002_collection_domain"]
 
 
 def test_every_revision_is_reversible() -> None:
@@ -72,10 +83,22 @@ def test_alembic_ini_holds_no_database_url() -> None:
 
 
 def test_no_migration_file_hardcodes_a_dsn() -> None:
+    """No URL scheme, no credential, no `user:password@` shape.
+
+    S0.2 grepped for the bare word `postgresql`, which was sufficient then because
+    no migration imported the dialect. S1.1's migration legitimately does --
+    `postgresql.JSONB` and `postgresql.UUID` are the right types for these
+    columns -- so the search tightened to what actually constitutes a DSN.
+    Catching a leaked password is the point; catching a correct dialect import
+    would only train the next author to work around the test.
+    """
+    import re
+
+    dsn = re.compile(r"postgres(?:ql)?(?:\+\w+)?://|password\s*=|:\w+@localhost")
     offenders = [
         path.name
         for path in MIGRATIONS_DIR.rglob("*.py")
-        if "postgresql" in path.read_text(encoding="utf-8")
+        if dsn.search(path.read_text(encoding="utf-8"))
     ]
     assert offenders == []
 

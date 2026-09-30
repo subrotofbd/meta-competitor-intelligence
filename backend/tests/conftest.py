@@ -24,10 +24,11 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from sqlalchemy.orm import Session
 
 from app.composition import build_ad_provider, build_ai_provider
 from app.core.config import Settings, get_settings
-from app.db.session import dispose_engine
+from app.db.session import dispose_engine, get_engine
 from app.providers.ai.base import AIProvider
 from app.providers.ai.models import CopyAnalysis
 from app.providers.data.base import AdDataProvider
@@ -209,3 +210,49 @@ def no_network(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(socket, "socket", _refuse)
     monkeypatch.setattr(socket, "create_connection", _refuse)
     monkeypatch.setattr(socket, "getaddrinfo", _refuse)
+
+
+# ============================================================
+# S1.1 -- write against the real schema, leave nothing behind
+# ============================================================
+
+
+@pytest.fixture
+def db_session() -> Iterator[Session]:
+    """A session whose every write is discarded when the test ends.
+
+    S1.1 asserts things that can only be asserted against a live PostgreSQL: that
+    a foreign key refuses an orphan, that a `CHECK` fires, that the
+    `payload_hash` trigger computes a value. Those tests have to write.
+
+    The alternative -- committing rows and cleaning up with a `DELETE` -- is
+    the one option this project may not reach for, because a `DELETE` against
+    the development database is exactly the kind of broad destructive command
+    the checkpoint rules require consent for, and a test that can destroy
+    development data is a test that eventually will. So the session is bound to
+    a connection wrapped in an outer transaction that is always rolled back:
+    nothing is ever committed, so there is nothing to clean up and no path by
+    which a failing test can leave rows behind.
+
+    It deliberately does not depend on `use_settings`, which points the engine
+    at `FAKE_DSN`. The real `get_engine()` is used here -- the same one
+    `test_db_integration.py` exercises -- because these tests are about the
+    schema that was actually migrated onto the container.
+
+    `join_transaction_mode="create_savepoint"` is set explicitly. It is
+    SQLAlchemy's default for a session bound to a connection, but the session
+    would also commit by default, and the whole safety property here rests on it
+    never reaching the outer transaction's commit.
+    """
+    connection = get_engine().connect()
+    outer = connection.begin()
+    session = Session(bind=connection, join_transaction_mode="create_savepoint")
+    try:
+        yield session
+    finally:
+        # A test that raised an IntegrityError leaves the session unusable;
+        # close() is the only safe teardown in that case.
+        session.close()
+        if outer.is_active:
+            outer.rollback()
+        connection.close()
