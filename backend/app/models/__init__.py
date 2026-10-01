@@ -54,9 +54,18 @@ Rules that apply to every model added here:
     `providers.data.provenance.evidence_class_for`, not stored. No table in this
     package carries the column, and the mapping is centralised precisely so that
     no call site can pick its own class.
-  - `media_assets` is content-addressed by sha256
+  - `media_assets` is identified by `UNIQUE(provider, provider_key)`. A provider
+    key is an **identity hint**, not a content digest: nothing verifies that a
+    provider keeps its keys stable, so a rotated key becomes a second row rather
+    than a guessed merge. It is deliberately **parentless** -- a creative is shared
+    across ads (the corpus has one key on two ads), so the observation
+    relationship lives in the `ad_snapshot_media` link table instead of a foreign
+    key here. There is no `sha256` column and no media bytes in S0-S3;
+    `storage_key` is the future-facing content key, and it is NULL on every row
+    S2.4 writes.
   - one parent per row. No ambiguous foreign keys, and no `ON DELETE CASCADE`
-    anywhere in the collected-data chain.
+    anywhere in the collected-data chain. `media_assets` is the single exception
+    and has no parent at all, as described above.
 
 Importing this package registers every table on `Base.metadata`, which is what
 `database/migrations/env.py` relies on for autogenerate.
