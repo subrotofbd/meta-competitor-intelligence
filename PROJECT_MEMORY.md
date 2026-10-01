@@ -2573,3 +2573,119 @@ environmental reasons, not because of any code change in this step.
 **Next step (not started, needs approval):** re-key `tests/fixtures/ai/analyses.json`
 by the real computed `copy_hash`, so the AI panel can be developed against real
 interpretations rather than an all-null one.
+
+---
+
+## 2026-10-02, S3.3 STOP CHECKPOINT
+
+Work paused deliberately. **Step 2 remains BLOCKED** on a decision only a human can
+make. No database reset, deletion or trigger change was performed.
+
+### Committed and unpushed
+
+| Commit | Contents |
+|---|---|
+| `438f4af` | **S3.3 Step 1, complete.** `GET /competitors` -- competitors with nested Facebook Pages, read-only, **no migration** (`ix_facebook_pages_competitor_id` already existed for it). 19 tests. |
+| `1b71445` | **S3.3 Step 2, implementation committed but BLOCKED.** `scripts/seed_demo.py` plus 18 focused tests. Also fixes a pre-existing bug in `composition.build_mock_pages()` that meant `python -m worker` had never run successfully against the mock provider. |
+
+`origin/main` is still **`df3160d`** -- S3.2's final fix. **Neither S3.3 commit has been
+pushed.**
+
+### What the seed is, and that it works
+
+`scripts/seed_demo.py` creates only a `Competitor` and three `FacebookPage` rows --
+operator configuration, not collected data -- then drives the **real production
+collection path**: `build_mock_pages()` -> `build_collection_orchestrator()` ->
+`schedule_collection()` -> `queue.claim()` -> `execute_collection_job()`, the same
+entry point `python -m worker` calls. No persistence logic is duplicated.
+
+It uses **`MockProvider`** against the sanitised corpus
+(`backend/tests/fixtures/ad_provider/corpus.json`, `.invalid` hosts, invented brands).
+**No real network request was made and no production data was touched.** `APP_ENV=prod`
+refuses before opening a connection.
+
+It **succeeded**: 9 ad records across 3 pages produced 8 ads, 8 snapshots, 8 status
+contexts, 8 media assets, 33 provider runs and 33 raw responses. The corpus repeats
+`mock-ad-000101` across two batches; it collapsed to one ad, which is the
+content-hash dedupe working.
+
+### The development database is DIRTY, on purpose
+
+Running the seed for real was necessary to reach the `MockBatch` bug. It committed
+**permanent** rows:
+
+```
+competitors 1 · facebook_pages 3 · ads 8 · ad_snapshots 8 · seen_in_run 45
+ad_status_by_context 8 · media_assets 8 · ad_snapshot_media 9
+provider_runs 33 · raw_responses 33 · collection_runs 31
+```
+
+**These cannot be deleted.** `ad_snapshots` is append-only and its trigger refuses
+`DELETE` as well as `UPDATE`; `ads` is then blocked by a foreign key. Two narrowly
+scoped cleanup attempts were made inside a transaction and **both rolled back cleanly**
+on the trigger's refusal. The database is intact and correct -- it simply contains
+demo data.
+
+**Treat it as DIRTY. Do not reset it, and do not "clean" it, without explicit human
+approval.** A reset would be `docker compose down -v` + `up -d` + `alembic upgrade
+head`, which is destructive and was correctly refused here.
+
+### 48 tests are red because of those rows -- not a regression
+
+| File | Red |
+|---|---|
+| `test_ad_persistence.py` | 21 |
+| `test_api_ads.py` | 18 |
+| `test_api_competitors.py` | 5 |
+| `test_collection_ordering.py` | 3 |
+| `test_collection_hardening.py` | 1 |
+
+Every one fails by **counting rows** and seeing the committed demo rows. This is an
+environmental consequence of the dirty database, **not** a defect introduced by Step 2.
+`test_mock_provider.py`, `test_job_queue.py` and `test_db_session.py` are green, which
+independently confirms the `MockBatch` fix did not regress those layers.
+
+**Recorded for whoever picks this up:** a database reset makes all 48 green again. No
+code change is needed for it, and none should be made to accommodate them -- making
+those assertions tolerate foreign rows would be the wrong fix.
+
+### Gates at the stop point
+
+`ruff check` clean · `ruff format --check` clean · project-gate `mypy` clean (58 files)
+· `mypy backend` **59, unchanged** · `alembic check` no drift · single head
+`0011_api_search_indexes` · **hermetic seed tests 18 passed** · with
+`test_mock_provider`/`test_job_queue`/`test_db_session` **87 passed**.
+
+### Not done
+
+- **AI fixture re-keying has NOT been done.** `tests/fixtures/ai/analyses.json` is
+  untouched. Its keys (`mock-copy-hash-en-001` and two others) cannot satisfy
+  `ad_analysis.copy_hash`'s 64-hex `CHECK`, so `MockAIProvider` would return its
+  all-null analysis for every real digest. Until it is re-keyed by the real computed
+  digest, the AI panel cannot be developed against a meaningful interpretation.
+- **No frontend work has started.**
+- **`INTERNAL_ERROR_MESSAGE` still promises a log that never happens.**
+  `execute_collection_job` catches bare `Exception`, writes only the generic pointer,
+  and never lets the exception escape, so the worker cannot log it either. Every
+  internal collection failure is undiagnosable from both the row and the log. Found
+  while diagnosing the seed; **not fixed**, being S1.x production behaviour outside
+  Step 2's scope.
+
+### The decision this checkpoint is waiting on
+
+**Is the development database reset, or is the red suite accepted until then?**
+
+- **Reset** (`docker compose down -v`, recreate, migrate). Restores 48 tests and a
+  clean slate. Destroys the demo data, which is the point -- it is reproducible by
+  rerunning the seed. Needs explicit approval.
+- **Accept for now.** S3.3 frontend work can continue, but the suite stays red for
+  environmental reasons and the seed cannot be re-run to produce *fresh* data without
+  adding to the existing rows.
+
+A related smaller question: whether `test_ad_persistence`'s row counts should count
+only within its own transaction. They already do -- the problem is that committed rows
+are visible *to* that transaction. Fixing it properly means resetting, not loosening
+the assertions.
+
+**Next step after that decision:** AI fixture re-keying, then the S3.3 frontend
+scaffold. Neither has started.
