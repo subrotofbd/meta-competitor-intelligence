@@ -268,6 +268,55 @@ def _apply_filters(statement: Select[Any], filters: AdFilters) -> Select[Any]:
     return statement
 
 
+def snapshot_platforms(snapshot: AdSnapshot | None) -> tuple[str, ...]:
+    """The platforms a provider reported for one snapshot, in the stored order.
+
+    Read from `normalized`, which already holds the full `RawAdRecord` -- so this adds
+    no column, changes no hash, and rewrites no stored evidence. `normalized` is
+    append-only and stays exactly as S2.1 wrote it.
+
+    **Order is the provider's, not ours.** It is neither sorted nor de-duplicated:
+    `creative_hash` sorts its keys before hashing precisely because order is *not*
+    significant to identity, but the display order is still what the provider gave,
+    and quietly re-sorting it would make the API disagree with the stored evidence.
+
+    Returns:
+        The reported platform names, or `()` when the snapshot has none or the value
+        is not a list of strings. `()` means **"the stored record lists no
+        platforms"**, which is not the same claim as "this ad ran on no platform" --
+        a provider that reports nothing is recorded as nothing, never as "none".
+
+    Only `str` members are taken. Anything else is skipped rather than coerced:
+    `str(123)` would invent the platform name "123".
+    """
+    if snapshot is None:
+        return ()
+    normalized = snapshot.normalized if isinstance(snapshot.normalized, dict) else {}
+    value = normalized.get("platforms")
+    if not isinstance(value, list | tuple):
+        return ()
+    return tuple(item for item in value if isinstance(item, str))
+
+
+def matching_ad_ids(filters: AdFilters) -> Select[Any]:
+    """The filtered ad-id query, as the single definition of "which ads match".
+
+    Exposed because the CSV exporter needs to count the *contexts* belonging to the
+    matching ads, not just the ads. Having one function build that subquery is what
+    keeps the export's row count and its rows themselves in agreement -- restating the
+    filter conditions in a second place is exactly how a preflight ends up counting a
+    different set from the one that is exported.
+    """
+    return _apply_filters(select(Ad.id), filters)
+
+
+def count_matching_ads(session: Session, filters: AdFilters) -> int:
+    """How many ads match, without paging any of them."""
+    return session.execute(
+        select(func.count()).select_from(matching_ad_ids(filters).subquery())
+    ).scalar_one()
+
+
 def list_ads(
     session: Session,
     *,

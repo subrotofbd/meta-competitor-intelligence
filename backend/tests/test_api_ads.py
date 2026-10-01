@@ -32,10 +32,10 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
-from sqlalchemy import event, text
+from sqlalchemy import Table, event, text
 from sqlalchemy.orm import Session
 
 from app.core.config import AppEnv
@@ -59,6 +59,7 @@ from app.services.ad_query import (
     analysis_for,
     list_ads,
     resolve_sort,
+    snapshot_platforms,
     validate_country,
     validate_data_origin,
     validate_status,
@@ -87,8 +88,18 @@ PROVIDER = "mock"
 
 
 def _page(session: Session, page_id: str, *, country: str = "IN", name: str = "Acme") -> Any:
-    """A tracked competitor Page, reusing the competitor of the same name."""
+    """A tracked competitor Page, reusing the competitor and Page of the same name.
+
+    **Idempotent.** `facebook_pages.page_id` is globally unique, so a second call with
+    the same id used to raise `UniqueViolation` rather than hand back the row it had
+    already made -- which turned "call `_page` again" into a test bug rather than a
+    no-op, and made helpers awkward to compose.
+    """
     from app.models.tracking import Competitor, FacebookPage
+
+    existing = session.query(FacebookPage).filter(FacebookPage.page_id == page_id).one_or_none()
+    if existing is not None:
+        return existing
 
     competitor = session.query(Competitor).filter(Competitor.name == name).one_or_none()
     if competitor is None:
@@ -1314,11 +1325,76 @@ def test_the_csv_honours_the_same_filters_as_the_list(db_session: Session) -> No
     assert len(filtered) == 2  # one row per context, only the AE one
 
 
+def test_the_csv_accepts_every_filter_ads_does(db_session: Session) -> None:
+    """Parity, asserted against `/ads` itself rather than a restated list.
+
+    The route docstring claimed "the same filters as `/ads`" while dropping four date
+    parameters. Comparing the two live routes' declared query parameters is what makes
+    the claim true and keeps it true.
+    """
+    spec = create_app(app_env=AppEnv.LOCAL).openapi()
+    ads_params = {p["name"] for p in spec["paths"]["/ads"]["get"]["parameters"]}
+    csv_params = {p["name"] for p in spec["paths"]["/exports/ads.csv"]["get"]["parameters"]}
+
+    # Paging and ordering belong to `/ads` alone; an export has no page.
+    paging_only = {"page", "page_size", "sort", "direction"}
+    assert ads_params - paging_only == csv_params
+    for date_filter in (
+        "first_seen_from",
+        "first_seen_to",
+        "last_seen_from",
+        "last_seen_to",
+    ):
+        assert date_filter in csv_params, date_filter
+
+
+@pytest.mark.parametrize(
+    ("parameter", "value"),
+    [
+        ("first_seen_to", "2000-01-01T00:00:00Z"),
+        ("last_seen_to", "2000-01-01T00:00:00Z"),
+    ],
+)
+def test_a_date_filter_actually_narrows_the_export(
+    db_session: Session, parameter: str, value: str
+) -> None:
+    """Proves the four new parameters feed the filter object rather than being accepted.
+
+    A parameter the route declares but never passes would leave the export showing
+    everything -- a silent divergence from the filtered `/ads` set.
+    """
+    page = _page(db_session, "page-a")
+    ad, _ = _observe(db_session, page_id=page.id, external_ad_id="ad-1")
+    _add_context(db_session, ad_id=ad.id, page_id=page.id)
+
+    _header, everything = _csv_rows(_client(db_session).get("/exports/ads.csv").body)
+    assert len(everything) == 1
+
+    _header, nothing = _csv_rows(
+        _client(db_session).get("/exports/ads.csv", **{parameter: value}).body
+    )
+    assert nothing == []
+
+
+def test_a_widening_date_filter_keeps_every_row(db_session: Session) -> None:
+    """The other direction, so the test above cannot pass by filtering everything."""
+    page = _page(db_session, "page-a")
+    ad, _ = _observe(db_session, page_id=page.id, external_ad_id="ad-1")
+    _add_context(db_session, ad_id=ad.id, page_id=page.id)
+
+    _header, rows = _csv_rows(
+        _client(db_session).get("/exports/ads.csv", first_seen_from="2000-01-01T00:00:00Z").body
+    )
+    assert len(rows) == 1
+
+
 def test_an_export_over_the_cap_is_refused_not_truncated(db_session: Session) -> None:
     """A partial export is indistinguishable from a complete one.
 
     Someone will act on a truncated file believing it whole, so this raises and the
-    route turns it into a 413.
+    route turns it into a 413. This is the **service** contract; the route-level
+    behaviour that depends on the check running at the right time is proved by
+    `test_an_oversized_export_is_a_413_over_real_http`.
     """
     page = _page(db_session, "page-a")
     ad, _ = _observe(db_session, page_id=page.id, external_ad_id="ad-1")
@@ -1328,16 +1404,279 @@ def test_an_export_over_the_cap_is_refused_not_truncated(db_session: Session) ->
         list(iter_export_rows(db_session, filters=AdFilters(), max_rows=0))
 
 
-def test_a_413_is_returned_for_an_oversized_export(db_session: Session, monkeypatch: Any) -> None:
+def _cap_at(monkeypatch: Any, rows: int) -> None:
+    """Lower the export cap to `rows` **as the route reads it**.
+
+    Patches the constant the route module imported -- configuration, not behaviour.
+    Every code path below is the shipped one: the real route, the real preflight, the
+    real count query, the real generator and real HTTP framing.
+    """
     import app.api.ads as ads_api
 
-    def _always_too_large(session: Any, *, filters: Any, max_rows: int = 0) -> Any:
-        raise CsvExportTooLarge("export would contain 999999 ads")
+    monkeypatch.setattr(ads_api, "MAX_EXPORT_ROWS", rows)
 
-    monkeypatch.setattr(ads_api, "stream_ads_csv", _always_too_large)
+
+def _ads_with_one_context(db_session: Session, count: int) -> None:
+    """`count` ads, each with exactly one context -- so rows == ads."""
+    page = _page(db_session, "page-a")
+    for index in range(count):
+        ad, _ = _observe(db_session, page_id=page.id, external_ad_id=f"ad-{index}")
+        _add_context(db_session, ad_id=ad.id, page_id=page.id)
+
+
+def test_an_oversized_export_is_a_413_over_real_http(db_session: Session, monkeypatch: Any) -> None:
+    """The whole point of this pass, over actual HTTP.
+
+    **The previous version of this test was false.** It replaced `stream_ads_csv`
+    with a plain function that raised eagerly, so it proved the route could turn an
+    exception into a 413 -- and the real `stream_ads_csv` is a *generator*, so the
+    real cap check can only run after `StreamingResponse` has already sent the status
+    line. The test passed while the product truncated.
+
+    Nothing is mocked here except the cap constant. Two ads, cap of one: the count
+    genuinely exceeds it.
+    """
+    _cap_at(monkeypatch, 1)
+    _ads_with_one_context(db_session, 2)
+
     response = _client(db_session).get("/exports/ads.csv")
     assert response.status_code == 413
-    assert "999999" in response.json()["detail"]
+
+
+def test_a_413_carries_no_csv_body_and_no_attachment_header(
+    db_session: Session, monkeypatch: Any
+) -> None:
+    """No partial file, and no `Content-Disposition` promising one.
+
+    Half a file under an attachment header is the exact outcome the cap exists to
+    prevent, so both are asserted: not a status of 200, and not a byte of CSV.
+    """
+    _cap_at(monkeypatch, 1)
+    _ads_with_one_context(db_session, 2)
+
+    response = _client(db_session).get("/exports/ads.csv")
+    assert response.status_code == 413
+    assert "ad_id" not in response.body, "a CSV header was streamed before the refusal"
+    assert "content-disposition" not in response.headers
+    assert response.json() == {"detail": response.json()["detail"]}
+
+
+def test_a_413_detail_is_stable_and_leaks_nothing(db_session: Session, monkeypatch: Any) -> None:
+    """Same refusal every time, and no internals in it."""
+    _cap_at(monkeypatch, 1)
+    _ads_with_one_context(db_session, 2)
+
+    first = _client(db_session).get("/exports/ads.csv")
+    second = _client(db_session).get("/exports/ads.csv")
+
+    assert first.body == second.body
+    detail = first.json()["detail"]
+    assert "rows" in detail and "1" in detail
+    for leak in ("Traceback", 'File "', "sqlalchemy", "psycopg", "SELECT"):
+        assert leak not in first.body, leak
+
+
+def test_an_export_exactly_at_the_cap_is_allowed(db_session: Session, monkeypatch: Any) -> None:
+    """The cap is inclusive. Off-by-one here would refuse a legitimate export."""
+    _cap_at(monkeypatch, 2)
+    _ads_with_one_context(db_session, 2)
+
+    response = _client(db_session).get("/exports/ads.csv")
+    assert response.status_code == 200
+    assert response.headers["content-disposition"].startswith("attachment")
+
+
+def test_one_row_over_the_cap_is_refused(db_session: Session, monkeypatch: Any) -> None:
+    """The boundary from the other side: `cap` is fine, `cap + 1` is not."""
+    _cap_at(monkeypatch, 3)
+    page = _page(db_session, "page-a")
+    _ads_with_one_context(db_session, 3)
+    assert _client(db_session).get("/exports/ads.csv").status_code == 200
+
+    ad, _ = _observe(db_session, page_id=page.id, external_ad_id="ad-extra")
+    _add_context(db_session, ad_id=ad.id, page_id=page.id)
+    response = _client(db_session).get("/exports/ads.csv")
+    assert response.status_code == 413
+
+
+def test_the_cap_counts_rows_not_ads(db_session: Session, monkeypatch: Any) -> None:
+    """One ad with three contexts is three rows.
+
+    Counting ads would admit this export through the preflight and only discover the
+    overrun halfway down the file -- the same truncation, reached a different way.
+    """
+    page = _page(db_session, "page-a")
+    ad, _ = _observe(db_session, page_id=page.id, external_ad_id="ad-1")
+    for country in ("IN", "AE", "GB"):
+        _add_context(db_session, ad_id=ad.id, page_id=page.id, country=country)
+
+    # One ad, cap of two: allowed on ad count, refused on row count.
+    _cap_at(monkeypatch, 2)
+    assert _client(db_session).get("/exports/ads.csv").status_code == 413
+
+
+def test_a_normal_export_is_still_streamed_as_200(db_session: Session, monkeypatch: Any) -> None:
+    """Refusing oversized exports must not have broken ordinary ones.
+
+    The preflight is two queries, not a buffer: the response is still produced by the
+    generator, row by row.
+    """
+    _cap_at(monkeypatch, 100)
+    _ads_with_one_context(db_session, 2)
+
+    response = _client(db_session).get("/exports/ads.csv")
+    assert response.status_code == 200
+    header, rows = _csv_rows(response.body)
+    assert header == list(COLUMNS)
+    assert len(rows) == 2
+
+
+# ============================================================
+# Platform visibility (S3.2 fix pass)
+# ============================================================
+
+
+def test_the_list_reports_the_latest_snapshots_platforms(db_session: Session) -> None:
+    """Platforms are product-required and were stored all along -- only unexposed.
+
+    They come out of `normalized`, which already holds the whole `RawAdRecord`, so
+    this adds no column and moves no hash.
+    """
+    page = _page(db_session, "page-a")
+    ad, _ = _observe(
+        db_session, page_id=page.id, external_ad_id="ad-1", platforms=("facebook", "instagram")
+    )
+    _add_context(db_session, ad_id=ad.id, page_id=page.id)
+
+    item = _client(db_session).get("/ads").json()["items"][0]
+    assert item["platforms"] == ["facebook", "instagram"]
+
+
+def test_the_detail_endpoint_reports_platforms(db_session: Session) -> None:
+    page = _page(db_session, "page-a")
+    ad, _ = _observe(db_session, page_id=page.id, external_ad_id="ad-1", platforms=("facebook",))
+    _add_context(db_session, ad_id=ad.id, page_id=page.id)
+
+    assert _client(db_session).get(f"/ads/{ad.id}").json()["platforms"] == ["facebook"]
+
+
+def test_each_snapshot_reports_its_own_platforms(db_session: Session) -> None:
+    """Per snapshot, because a snapshot is an *observation*.
+
+    An ad can move between platforms, and showing the newest value on every row would
+    make history claim things it never saw.
+    """
+    page = _page(db_session, "page-a")
+    ad, _ = _observe(db_session, page_id=page.id, external_ad_id="ad-1", platforms=("facebook",))
+    _observe(
+        db_session,
+        page_id=page.id,
+        external_ad_id="ad-1",
+        offset_days=4,
+        platforms=("instagram",),
+        primary_text="Now on Instagram too.",
+    )
+    _add_context(db_session, ad_id=ad.id, page_id=page.id)
+
+    body = _client(db_session).get(f"/ads/{ad.id}/snapshots", page_size=50).json()
+    reported = {tuple(item["platforms"]) for item in body["items"]}
+    assert reported == {("facebook",), ("instagram",)}
+
+
+def test_platform_order_is_the_providers_not_ours(db_session: Session) -> None:
+    """Not sorted, not de-duplicated, not re-ordered.
+
+    Re-sorting would make the API disagree with the stored evidence it reads.
+    """
+    page = _page(db_session, "page-a")
+    ad, _ = _observe(
+        db_session,
+        page_id=page.id,
+        external_ad_id="ad-1",
+        platforms=("instagram", "facebook", "audience_network"),
+    )
+    _add_context(db_session, ad_id=ad.id, page_id=page.id)
+
+    assert _client(db_session).get(f"/ads/{ad.id}").json()["platforms"] == [
+        "instagram",
+        "facebook",
+        "audience_network",
+    ]
+
+
+def test_no_platforms_is_an_empty_list_not_a_claim(db_session: Session) -> None:
+    """`[]` means "the stored record lists none" -- never "this ad ran nowhere"."""
+    page = _page(db_session, "page-a")
+    ad, _ = _observe(db_session, page_id=page.id, external_ad_id="ad-1", platforms=())
+    _add_context(db_session, ad_id=ad.id, page_id=page.id)
+
+    item = _client(db_session).get(f"/ads/{ad.id}").json()
+    assert item["platforms"] == []
+    assert "none" not in str(item["platforms"]).lower()
+
+
+def test_a_missing_platforms_key_is_treated_as_absent_not_invented() -> None:
+    """Robustness against a `normalized` document written before the key existed.
+
+    Tested as a pure function with a stub, because the alternative -- updating a real
+    snapshot to drop the key -- is refused by the append-only trigger. That refusal is
+    the design working: `normalized` cannot be rewritten, so the reader has to cope
+    with whatever shape it finds.
+    """
+    from dataclasses import dataclass
+
+    @dataclass
+    class _Stub:
+        normalized: dict[str, Any]
+
+    assert snapshot_platforms(_Stub({"headline": "x"})) == ()  # type: ignore[arg-type]
+    assert snapshot_platforms(_Stub({"platforms": None})) == ()  # type: ignore[arg-type]
+    assert snapshot_platforms(_Stub({"platforms": "facebook"})) == ()  # type: ignore[arg-type]
+    assert snapshot_platforms(_Stub({"platforms": []})) == ()  # type: ignore[arg-type]
+    assert snapshot_platforms(None) == ()
+
+
+def test_a_non_string_platform_is_skipped_rather_than_coerced() -> None:
+    """`str(123)` would invent a platform called "123"."""
+    from dataclasses import dataclass
+
+    @dataclass
+    class _Stub:
+        normalized: dict[str, Any]
+
+    stub = _Stub({"platforms": ["facebook", 7, None, {"a": 1}]})
+    assert snapshot_platforms(stub) == ("facebook",)  # type: ignore[arg-type]
+
+
+def test_the_csv_carries_a_platforms_column(db_session: Session) -> None:
+    page = _page(db_session, "page-a")
+    ad, _ = _observe(
+        db_session, page_id=page.id, external_ad_id="ad-1", platforms=("facebook", "instagram")
+    )
+    _add_context(db_session, ad_id=ad.id, page_id=page.id)
+
+    header, rows = _csv_rows(_client(db_session).get("/exports/ads.csv").body)
+    index = {name: position for position, name in enumerate(header)}
+    assert "platforms" in index
+    assert rows[0][index["platforms"]] == "facebook,instagram"
+
+
+def test_an_empty_platform_list_is_an_empty_csv_cell(db_session: Session) -> None:
+    """Not the string "none", which would be a claim the provider never made."""
+    page = _page(db_session, "page-a")
+    ad, _ = _observe(db_session, page_id=page.id, external_ad_id="ad-1", platforms=())
+    _add_context(db_session, ad_id=ad.id, page_id=page.id)
+
+    header, rows = _csv_rows(_client(db_session).get("/exports/ads.csv").body)
+    index = {name: position for position, name in enumerate(header)}
+    assert rows[0][index["platforms"]] == ""
+
+
+def test_platform_visibility_added_no_column_and_no_index(db_session: Session) -> None:
+    """Read out of `normalized`, so the schema is untouched by this pass."""
+    table = cast("Table", AdSnapshot.__table__)
+    assert "platforms" not in {str(column.name) for column in table.c}
+    assert not [index for index in table.indexes if "platform" in str(index.name)]
 
 
 def test_the_row_cap_is_a_documented_constant() -> None:

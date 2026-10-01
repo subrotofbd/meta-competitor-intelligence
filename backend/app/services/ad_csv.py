@@ -37,11 +37,35 @@ silently.
 Never `0`, never `NULL`, never `N/A`. `AGENTS.md` section 7 requires absence to stay
 absence, and a numeric zero in a duration column would be a measurement nobody took.
 
-## The cap is a refusal, not a truncation
+## The cap is a refusal, not a truncation -- and the refusal has to arrive in time
 
 Above `MAX_EXPORT_ROWS` the export raises `CsvExportTooLarge`, which the route turns
 into a **413**. A truncated file is indistinguishable from a complete one, and
 someone will act on it.
+
+**The refusal only means anything if it arrives before the first byte.** This is the
+subtle part, and it was wrong once.
+
+`stream_ads_csv` is a *generator*: calling it runs no code and returns an iterator.
+Starlette's `StreamingResponse.stream_response` sends `http.response.start` -- the
+status line and the headers -- and only then iterates the body. So a cap check that
+lives *inside* the generator executes after the client has already been told
+**200 OK** with `Content-Disposition: attachment`. The check fires, the stream dies
+mid-body, and the caller is left holding a truncated file wearing a success status:
+precisely the outcome this module exists to prevent.
+
+So the cap is decided by `count_export_rows`, a plain function the route calls
+**before** it constructs a `StreamingResponse`. The generator re-checks as a backstop,
+but by then the decision has already been communicated, so the two cannot disagree
+about whether an export was allowed to start.
+
+`count_export_rows` is deliberately **not** a generator, and it counts **rows**, not
+ads. Counting ads would let a many-context ad pass the preflight and then exceed the
+cap part way through the stream -- the same truncation, reached by a different road.
+
+The one edge case this cannot cover: if rows are written *between* the preflight and
+the stream, the generator's backstop can still fire mid-body. Closing that would mean
+buffering the whole file, which is the thing streaming exists to avoid.
 
 ## No internal anything
 
@@ -57,16 +81,21 @@ from collections.abc import Iterator
 from datetime import UTC, datetime
 from typing import Final
 
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.models.ad_status import AdStatusByContext
+from app.models.ads import Ad
 from app.models.analysis import AdAnalysis
 from app.services.ad_query import (
     MAX_PAGE_SIZE,
     AdFilters,
     AdRecord,
     analysis_for,
+    count_matching_ads,
     list_ads,
+    matching_ad_ids,
+    snapshot_platforms,
 )
 
 #: Hard ceiling on exported rows. Every ad with a context produces several rows, so
@@ -106,6 +135,7 @@ COLUMNS: Final[tuple[str, ...]] = (
     "analysis_confidence",
     "analysis_version",
     "media_provider_keys",
+    "platforms",
 )
 
 
@@ -113,7 +143,68 @@ class CsvExportTooLarge(Exception):
     """The export would exceed `MAX_EXPORT_ROWS`.
 
     Raised rather than truncated: a partial export looks exactly like a complete one.
+
+    **Must be raised by a plain function, before the response starts.** Inside a
+    generator it is raised too late to change the status code -- see the module
+    docstring, and `count_export_rows`.
     """
+
+
+def count_export_rows(
+    session: Session, *, filters: AdFilters, max_rows: int = MAX_EXPORT_ROWS
+) -> int:
+    """How many CSV rows this export would emit, refusing the export if too many.
+
+    **Not a generator, and that is the whole point.** The route calls this before it
+    builds a `StreamingResponse`, so an oversized export is answered with 413 while
+    nothing has been sent. A check placed inside the body generator would run after
+    the 200 and the attachment headers were already on the wire.
+
+    Counts **rows**, not ads: an ad emits one row per context, or one row when it has
+    no context at all. So the total is `context rows + context-free ads`, which is not
+    `ads + context rows` -- that double-counts every ad that *has* a context, and
+    would refuse exports that are comfortably inside the cap.
+
+    Counting ads alone would be worse: a many-context ad would pass the preflight and
+    only discover the overrun halfway down the file -- the same truncation by a
+    different route.
+
+    Args:
+        session: Read-only session. Nothing is written.
+        filters: The same filters the rows themselves will be built from.
+        max_rows: Inclusive ceiling. A result exactly equal to it is allowed.
+
+    Returns:
+        The exact row count, when it is within `max_rows`.
+
+    Raises:
+        CsvExportTooLarge: The export would exceed `max_rows`.
+    """
+    matching = matching_ad_ids(filters)
+
+    total_ads = count_matching_ads(session, filters)
+    # Every context row belonging to a matching ad becomes a line.
+    context_rows = session.execute(
+        select(func.count())
+        .select_from(AdStatusByContext)
+        .where(AdStatusByContext.ad_id.in_(matching))
+    ).scalar_one()
+    # A matching ad with no context still gets one line, so those are counted too --
+    # otherwise an export of context-free ads would look empty and pass unchecked.
+    context_free = session.execute(
+        select(func.count())
+        .select_from(matching.subquery())
+        .where(Ad.id.not_in(select(AdStatusByContext.ad_id)))
+    ).scalar_one()
+
+    rows = int(context_rows) + int(context_free)
+
+    if rows > max_rows:
+        raise CsvExportTooLarge(
+            f"export would contain {rows} rows from {total_ads} ads, above the "
+            f"{max_rows} row limit; narrow the filters or use the API's paging"
+        )
+    return rows
 
 
 def escape_cell(value: str | None) -> str | None:
@@ -159,21 +250,34 @@ def render_cell(value: object) -> str | None:
     return escape_cell(str(value))
 
 
+def platforms_cell(record: AdRecord) -> str | None:
+    """The latest snapshot's platforms, comma separated **in the stored order**.
+
+    Provider order, not sorted: `normalized` holds what the provider reported, and
+    reordering it would make the export disagree with the API it mirrors. Empty means
+    the stored record lists none -- rendered as an empty cell rather than the word
+    "none", which would be a claim nobody made.
+    """
+    platforms = snapshot_platforms(record.snapshot)
+    return ",".join(platforms) or None
+
+
 def iter_export_rows(
     session: Session, *, filters: AdFilters, max_rows: int = MAX_EXPORT_ROWS
 ) -> Iterator[list[str | None]]:
     """Yield one row per ad per context, paging internally.
 
     Pages in `MAX_PAGE_SIZE` chunks rather than loading everything, so the memory
-    cost is bounded by the page and not by the corpus. `total` is read first so the
-    cap can be refused *before* any work is done, which is what makes a 413 cheap.
+    cost is bounded by the page and not by the corpus.
+
+    The cap is re-checked here, but this is a **backstop, not the gate**: the route
+    already called `count_export_rows` before committing a 200, so in the normal path
+    this branch is unreachable. It exists for a caller that reaches this generator
+    without the preflight, and for the case where rows are written in between.
     """
+    count_export_rows(session, filters=filters, max_rows=max_rows)
+
     first = list_ads(session, filters=filters, page=1, page_size=MAX_PAGE_SIZE, with_media=True)
-    if first.total > max_rows:
-        raise CsvExportTooLarge(
-            f"export would contain {first.total} ads, above the {max_rows} row limit; "
-            f"narrow the filters or use the API's paging"
-        )
 
     analyses = _analyses_for(session, list(first.items))
 
@@ -211,6 +315,9 @@ def iter_export_rows(
             for context in context_rows:
                 emitted += 1
                 if emitted > max_rows:
+                    # Unreachable via the route -- `count_export_rows` already
+                    # refused this export before the status line was sent. Kept for a
+                    # direct caller, and for rows written mid-stream.
                     raise CsvExportTooLarge(f"export exceeded {max_rows} rows")
                 yield [
                     render_cell(str(ad.id)),
@@ -245,6 +352,7 @@ def iter_export_rows(
                     render_cell(
                         "|".join(sorted(asset.provider_key for asset in record.media)) or None
                     ),
+                    render_cell(platforms_cell(record)),
                 ]
         page += 1
 

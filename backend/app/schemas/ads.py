@@ -191,6 +191,14 @@ class AdListItemOut(_Response):
     duration: DurationOut | None
     contexts: tuple[ContextOut, ...]
     media: tuple[MediaReferenceOut, ...] = ()
+    #: Where the provider reported this ad running, in the provider's own order.
+    #:
+    #: Read from the latest snapshot's `normalized` document -- no column was added
+    #: and no hash moved. `[]` means **the stored record lists no platforms**, which
+    #: is not the claim "this ad ran nowhere": a provider that reports nothing is
+    #: recorded as nothing. `tuple` rather than `list` for consistency with
+    #: `contexts` and `media`; it serialises to a JSON array either way.
+    platforms: tuple[str, ...] = ()
 
 
 class AdListOut(_Response):
@@ -226,6 +234,9 @@ class AdDetailOut(_Response):
     copy_fields: CopyFieldsOut | None
     analysis: AnalysisOut | None
     media: tuple[MediaReferenceOut, ...] = ()
+    #: The latest snapshot's reported platforms, provider order preserved. `[]` means
+    #: the stored record lists none -- never that the ad ran on no platform.
+    platforms: tuple[str, ...] = ()
 
 
 class SnapshotListItemOut(_Response):
@@ -246,6 +257,13 @@ class SnapshotListItemOut(_Response):
     meta_delivery_start: datetime | None
     copy_fields: CopyFieldsOut
     media: tuple[MediaReferenceOut, ...] = ()
+    #: This snapshot's own reported platforms, provider order preserved.
+    #:
+    #: Per snapshot rather than per ad, because a snapshot is an *observation*: it
+    #: records what the provider said at a moment, and the platforms an ad ran on can
+    #: legitimately differ between two observations of the same ad. Reading the
+    #: latest value for every row would make history claim things it never saw.
+    platforms: tuple[str, ...] = ()
     #: Referenced, not embedded. Copy-scoped analysis means the analysis an ad
     #: currently resolves to may originate from a *different* snapshot, and saying so
     #: honestly is better than pretending this observation produced it.

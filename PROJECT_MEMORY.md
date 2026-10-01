@@ -2231,3 +2231,103 @@ claiming a checkpoint is green.** A green assertion nobody re-ran is not a guara
 
 `test_ads.py` and `test_models.py` both refer to a `test_schema_integration` that does
 not exist under that name. Pre-existing, outside S3.2, left alone.
+
+---
+
+## 2026-10-02, S3.2 fix pass -- export 413 and platform visibility
+
+Follows a read-only pre-push review of `574daaa`. `574daaa` was **not** amended; this is a new commit.
+
+### The blocker: the CSV 413 could not happen
+
+**Root cause.** `stream_ads_csv` is a **generator function** (`yield` at its body). Calling it executes no code and
+returns an iterator. Starlette's `StreamingResponse.stream_response` sends `http.response.start` -- status line and
+headers -- and only *then* iterates the body (verified in the installed
+`.venv/Lib/site-packages/starlette/responses.py`). So `CsvExportTooLarge`, raised inside `iter_export_rows`, could only
+be raised **after** the client already held a 200 and `Content-Disposition: attachment`.
+
+The route's `try/except CsvExportTooLarge` around `stream_ads_csv(...)` was therefore **dead code**. The export was
+answered with **200 and a truncated body** -- exactly the outcome the module exists to prevent.
+
+**The test had certified the bug.** `test_a_413_is_returned_for_an_oversized_export` replaced `stream_ads_csv` with a
+*plain function* that raised eagerly, so it proved only that the route could translate an exception into a 413. It
+never touched the generator, so it passed while the product truncated.
+
+**Fix.** `count_export_rows(session, filters, max_rows)` -- a plain function, no `yield` -- now decides the cap, and
+the route calls it **before** constructing the `StreamingResponse`. Two or three count queries; nothing is buffered.
+It counts **rows**, not ads: rows = context rows + context-free ads. `ads + context rows` was tried first and is
+wrong -- it double-counts every ad that *has* a context, which made a 2-row export report 4 and refused a legal export
+(caught by `test_an_export_exactly_at_the_cap_is_allowed`). Counting ads alone would be worse: a many-context ad would
+clear the preflight and overrun mid-stream, the same truncation by a different road.
+
+The generator still re-checks, now explicitly labelled a backstop rather than the gate. The one uncovered edge: rows
+written *between* the preflight and the stream can still trip it, and closing that would mean buffering the whole
+file -- the thing streaming exists to avoid. Documented rather than hidden.
+
+**New tests, all over real HTTP.** Only the cap *constant* is patched (configuration, not behaviour); the route,
+preflight, count query, generator and HTTP framing are all the shipped ones.
+`test_an_oversized_export_is_a_413_over_real_http`, `test_a_413_carries_no_csv_body_and_no_attachment_header`,
+`test_a_413_detail_is_stable_and_leaks_nothing`, `test_an_export_exactly_at_the_cap_is_allowed` (inclusive boundary),
+`test_one_row_over_the_cap_is_refused` (cap+1), `test_the_cap_counts_rows_not_ads`,
+`test_a_normal_export_is_still_streamed_as_200`.
+
+**Mutation-verified.** Removing the preflight -- restoring the original broken shape -- fails **5** of them. The old
+mocked test would still have passed.
+
+### Platform visibility
+
+Platform **visibility** was product-required and was stored all along; only the deferred **filter** was ever meant to
+wait. `normalized` is the full `RawAdRecord.model_dump()`, so platforms were already there.
+
+`snapshot_platforms(snapshot)` in `services/ad_query.py` reads them out. **No column, no index, no hash moved, and
+`normalized` is not modified** -- pinned by `test_platform_visibility_added_no_column_and_no_index`. Exposed as
+`platforms` on `/ads` (latest snapshot), `/ads/{id}` (latest snapshot), `/ads/{id}/snapshots` (**each snapshot's
+own** -- a snapshot is an observation, and platforms can differ between two observations of one ad), and a `platforms`
+column in CSV.
+
+Semantics: provider order preserved, never sorted or de-duplicated; non-`str` members skipped rather than coerced
+(`str(7)` would invent a platform named "7"); `[]` / empty cell means *the stored record lists none*, never "this ad
+ran nowhere". Serialised as a JSON array (a `tuple` in the model, consistent with `contexts` and `media`).
+
+Two tests were first written to mutate a stored snapshot's `normalized` and were refused by the **append-only
+trigger** (`RestrictViolation: ad_snapshots is append-only`). That refusal is the design working, so both were rewritten
+as pure-function tests over a stub instead of being worked around.
+
+### CSV filter parity
+
+The route docstring claimed "the same filters as `/ads`" while omitting `first_seen_from/to` and `last_seen_from/to`.
+Chose the code fix, not the weaker sentence. All four now feed the same `AdFilters`. Proven by
+`test_the_csv_accepts_every_filter_ads_does`, which compares the two **live routes'** OpenAPI parameters rather than a
+restated list, plus two narrowing tests and one widening test so the narrowing test cannot pass by filtering
+everything.
+
+### Incidental test-helper fix
+
+`_page()` is now idempotent. `facebook_pages.page_id` is globally unique, so a second call raised `UniqueViolation`
+instead of returning the row it had already made -- making helpers awkward to compose and turning "call `_page` again"
+into a test bug.
+
+### Not touched, deliberately
+
+The search implementation, the two GIN indexes, migration `0011`, the three pre-existing test repairs, and every S2 /
+S3.1 contract. `/ads` page-size semantics and the export cap value are unchanged.
+
+### Validation
+
+`test_api_ads.py` **118 passed** (was 98; +20). Targeted regressions: `test_ads`, `test_models`, `test_db_base`,
+`test_architecture_boundaries`, `test_offline_guard`, `test_media_url_security`, `test_fixture_safety`,
+`test_ai_analysis` -- **428 passed** with the S3.2 file. Then `test_media_references`, `test_migrations`,
+`test_config` -- **74 passed**. No full suite, no xdist, no parallel runs.
+
+`ruff check backend` clean. `ruff format --check backend` clean. Project-gate `mypy` clean (54 files). `mypy backend`
+back at **59**, unchanged. `alembic check` reports no drift and `alembic current` is `0011_api_search_indexes (head)`;
+run only as a read-only confirmation that this pass did not disturb model metadata, since no migration or model file
+changed.
+
+### Known limitations carried forward
+
+Unchanged from the S3.2 entry, and still true: every table holds 0 rows, so no query plan or index *selection* has been
+exercised -- only index *matching*; no relevance ranking, only deterministic `last_seen_at DESC, id DESC` ordering;
+combined context filters are independent `EXISTS` clauses, so `competitor_id` + `country` + `current_status` can be
+satisfied by different contexts of one ad; `direction` invalid yields 422 while `sort` invalid yields 400;
+`MediaReferenceOut.bytes_available` is a hard-coded `false`; no `/healthz`; no authentication, by design.

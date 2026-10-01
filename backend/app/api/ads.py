@@ -61,7 +61,12 @@ from app.schemas.ads import (
     SnapshotListOut,
     SnapshotSummaryOut,
 )
-from app.services.ad_csv import CsvExportTooLarge, stream_ads_csv
+from app.services.ad_csv import (
+    MAX_EXPORT_ROWS,
+    CsvExportTooLarge,
+    count_export_rows,
+    stream_ads_csv,
+)
 from app.services.ad_query import (
     DEFAULT_PAGE_SIZE,
     MAX_PAGE_SIZE,
@@ -71,6 +76,7 @@ from app.services.ad_query import (
     analysis_for,
     get_ad,
     list_ads,
+    snapshot_platforms,
     validate_country,
     validate_data_origin,
     validate_status,
@@ -235,6 +241,7 @@ def _list_item_out(record: AdRecord) -> AdListItemOut:
         duration=_duration_out(record),
         contexts=_contexts_out(record),
         media=_media_out(record),
+        platforms=snapshot_platforms(record.snapshot),
     )
 
 
@@ -390,6 +397,7 @@ def get_one_ad(ad_id: uuid.UUID, session: SessionDep) -> AdDetailOut:
         copy_fields=_copy_fields_out(record.snapshot),
         analysis=_analysis_out(analysis),
         media=_media_out(record),
+        platforms=snapshot_platforms(record.snapshot),
     )
 
 
@@ -443,6 +451,7 @@ def get_ad_snapshots(
             copy_fields=_copy_fields_out(row) or _EMPTY_COPY,
             media=media_by_snapshot.get(row.id, ()),
             analysis_copy_hash=row.copy_hash,
+            platforms=snapshot_platforms(row),
         )
         for row in rows
     )
@@ -494,6 +503,10 @@ def export_ads_csv(
     current_status: str | None = None,
     provider_active: bool | None = None,
     data_origin: str | None = None,
+    first_seen_from: datetime | None = None,
+    first_seen_to: datetime | None = None,
+    last_seen_from: datetime | None = None,
+    last_seen_to: datetime | None = None,
     q: str | None = None,
 ) -> StreamingResponse:
     """The same filters as `/ads`, as CSV. One row per ad **per context**.
@@ -502,7 +515,17 @@ def export_ads_csv(
     false-global-status error the JSON shape avoids -- so a multi-context ad gets one
     row per context and a context-free ad gets one row with empty context columns.
 
-    Accepts the same filters as `/ads` so "export what I filtered" is possible.
+    Accepts **every** filter `/ads` accepts, including the four observation-date
+    ranges, so "export what I filtered" is literally true rather than nearly true.
+    The date parameters are the fix for a docstring that claimed parity while
+    dropping four of them -- the claim was not weakened, the code caught up.
+
+    The cap is decided **before** the response starts. `count_export_rows` is a plain
+    function precisely so that: `StreamingResponse` commits the status line and the
+    headers before it iterates anything, so a check inside the body generator would
+    arrive too late to answer with a 413, and the caller would be left holding a
+    truncated file under a 200. Nothing is buffered to achieve this -- normal exports
+    are still streamed row by row.
     """
     filters = _filters(
         provider,
@@ -512,20 +535,22 @@ def export_ads_csv(
         current_status,
         provider_active,
         data_origin,
-        None,
-        None,
-        None,
-        None,
+        first_seen_from,
+        first_seen_to,
+        last_seen_from,
+        last_seen_to,
         q,
     )
     try:
-        stream = stream_ads_csv(session, filters=filters)
+        # Deliberately outside the generator. Three count queries, before any byte is
+        # sent -- the price of a 413 that arrives while it can still change the status.
+        count_export_rows(session, filters=filters, max_rows=MAX_EXPORT_ROWS)
     except CsvExportTooLarge as error:
         # 413 rather than a silently truncated file: a partial export looks exactly
         # like a complete one, which is the worst thing to hand someone.
         raise HTTPException(status_code=413, detail=str(error)) from error
     return StreamingResponse(
-        stream,
+        stream_ads_csv(session, filters=filters, max_rows=MAX_EXPORT_ROWS),
         media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": 'attachment; filename="ads.csv"'},
     )

@@ -262,6 +262,15 @@ Filters **deferred**, each because it lives in JSONB or needs its own join and v
 **One row per ad, with `contexts[]`.** There is no ad-level `current_status` anywhere in the API. S2.3 gives each
 `(ad, Page, country)` context its own conclusion, and a scalar would assert one of them as if it were the whole truth.
 
+**`platforms` is visible; the `platform` *filter* is deferred.** These are separate decisions and only the filter was
+postponed. Platforms are read out of `ad_snapshots.normalized`, which already holds the whole `RawAdRecord` -- so
+visibility adds **no column, no index, and moves no hash**, and `normalized` stays exactly as S2.1 wrote it. Provider
+order is preserved and never sorted or de-duplicated. `[]` means *the stored record lists no platforms*, which is
+**not** the claim "this ad ran on no platform". `/ads` and `/ads/{id}` report the latest snapshot's platforms;
+`/ads/{id}/snapshots` reports **each snapshot's own**, because a snapshot is an observation and platforms can
+legitimately differ between two observations of the same ad. CSV carries a `platforms` column, comma separated in
+stored order.
+
 Search: PostgreSQL `to_tsvector('simple', ...)` plus `pg_trgm` over the same four-field copy projection, both GIN,
 both **expression indexes** over `ad_snapshots.normalized` -- the copy text is read in place and never promoted to
 columns, because `normalized` is append-only evidence. `'simple'` rather than `'english'`: the corpus is Hindi and
@@ -270,9 +279,18 @@ Hinglish, and an English stemmer mangles Devanagari. No external search engine i
 **CSV export** is one row per ad **per context** (a CSV cannot nest), UTF-8, header always present, ISO-8601 UTC
 timestamps, NULL as an empty cell. A cell beginning `=`, `+`, `-`, `@`, TAB or CR is prefixed with a single quote,
 because provider ad copy routinely begins with `-` or `+` and a spreadsheet would execute it as a formula. The export
-is capped, and exceeding the cap returns **413** rather than truncating: a truncated file is indistinguishable from a
-complete one. No `raw_ref`, queue id, prompt, raw model response or `storage_key` appears in any response, in JSON or
-in CSV.
+accepts **every** filter `/ads` accepts, so "export what I filtered" is literally true. The export is capped, and
+exceeding the cap returns **413** rather than truncating: a truncated file is indistinguishable from a complete one.
+
+**That 413 has to arrive before the first byte, which constrains the code shape.** `StreamingResponse` sends the
+status line and headers *before* it iterates the body, so a cap check that lives inside a generator fires after the
+client already holds a 200 and a `Content-Disposition` header. The cap is therefore decided by `count_export_rows`, a
+plain function the route calls before it builds the response. It counts **rows** (contexts plus context-free ads),
+not ads, so a many-context ad cannot pass the preflight and overrun mid-stream. Nothing is buffered; normal exports
+are still streamed. The one case this cannot cover is rows written *between* the preflight and the stream, which would
+require buffering the whole file to close.
+
+No `raw_ref`, queue id, prompt, raw model response or `storage_key` appears in any response, in JSON or in CSV.
 
 ## Security
 Secrets only in env (`.env.example`, `.env` gitignored). Argon2 password hashing, short-lived JWT + refresh, role checks
