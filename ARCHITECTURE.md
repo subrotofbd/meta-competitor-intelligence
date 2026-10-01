@@ -13,7 +13,11 @@ scope and only leaves seams. See IMPLEMENTATION_PLAN.md.
 - Media: `MediaStore` interface with `LocalFsStore` (dev); `S3Store` (MinIO/S3/R2) is a later checkpoint.
   Content-addressed keys. **No media bytes are acquired in S0-S3**, so nothing calls a `MediaStore` yet and
   `media_assets.storage_key` is always NULL. `creative_hash` v1 hashes **provider keys**, not bytes.
-- AI: `AIProvider` interface; `OpenAIProvider`, `GeminiProvider`. Model names come from settings, never hard-coded.
+- AI: `AIProvider` interface. **S3.1 ships `MockAIProvider` only** -- no `OpenAIProvider` or
+  `GeminiProvider` has ever existed, and an earlier draft of this line naming both was wrong. No AI
+  SDK is installed (`AGENTS.md` section 12), so a real adapter is a later phase. Model names come
+  from settings, never hard-coded, and `build_ai_provider` refuses a provider it cannot build rather
+  than silently substituting the mock.
 - Deployment: Docker Compose (postgres, minio optional, backend, worker, frontend). Windows via Docker Desktop/WSL2.
 
 ## Layout
@@ -75,8 +79,13 @@ storage_key and byte_size are always NULL and there is no sha256/bytes/downloade
 `ad_snapshot_media`(snapshot + asset, position -- the many-to-many observation link; an asset is shared, so
 `media_assets` has **no** foreign key),
 `ad_platforms`, `ad_countries`, `landing_pages`(canonical URL only in slice 1 -- **DEFERRED, not built**).
-AI: `ad_analysis`(ad_id, copy_hash, analysis_version, model, provider, prompt_version, result JSONB, tokens,
-cost_estimate, status), `ai_jobs`.
+AI: `ad_analysis`(**copy-scoped**, `UNIQUE(copy_hash, analysis_version)`; `source_ad_id` +
+`source_ad_snapshot_id` are provenance for the `AI INTERPRETATION` badge, **not** identity; fourteen typed
+nullable analysis columns rather than a `result` JSONB, plus `language`, `confidence`, `provider`, `model`,
+`prompt_version` -- no spend/roas/leads/conversions/reach column exists and that absence is the control),
+`ai_jobs`(**one row per AI provider CALL attempt**, `job_id -> jobs.id`; **not a second queue** -- no lease,
+worker id or retry counter of its own; provider-reported tokens, and an all-or-nothing cost triple that
+is NULL in S3.1 because there is no documented pricing method yet).
 All tables: `id` (UUID), `created_at`, `updated_at`, and `provider`/`data_origin`/`collection_run_id` where relevant.
 Deferred tables (created later, not now): video_*, scene_*, hooks/offers/ctas banks, patterns, reports, alerts.
 
@@ -189,14 +198,46 @@ Failures are recorded per asset, not per run. Media is served through authentica
 routes, never public buckets. When this lands, byte hashing becomes `creative_hash` **v2**; no
 stored `s2.2-creative-v1` value is reinterpreted, recomputed or backfilled.
 
-## AI copy analysis (slice 1)
-- Input: normalized copy fields per ad (all cards' text joined with markers), country, language hint.
-- Output JSON (validated with Pydantic, one retry on invalid JSON): hook, problem, promise, offer, cta, persona,
-  pain_point, angle, proof, urgency, awareness_level, funnel_stage, copy_structure, why_it_may_work, plus `language`
-  and `confidence` (low/med/high). Empty fields are `null`, never invented.
-- Prompt states: no performance claims; interpretation only. UI badge `AI INTERPRETATION`.
-- Dedupe: skip when `(copy_hash, analysis_version)` already has a successful result. Track tokens and estimated cost.
-- Hindi/Hinglish copy is analyzed in original language; English summary fields produced alongside.
+## AI copy analysis (S3.1)
+
+**Built in S3.1**, against `MockAIProvider` only. No AI SDK, no real provider, no external call.
+
+- **Input**, read from `ad_snapshots.normalized` and passed as **four separate fields** -- `primary_text`,
+  `headline`, `description`, `cta` -- plus `copy_hash`, `analysis_version` and `country`. They are **not**
+  concatenated: "Free shipping" as a headline and as body text are two different signals. An earlier draft
+  said "all cards' text joined with markers", which describes a capability that does not exist (only
+  `bodies[0]` is ever read; `ad_creatives` is deferred). `destination_url`, media URLs and storage keys are
+  **not sent** -- untrusted strings with no analytical value here, though `copy_hash` still covers the URL.
+  `language_hint` is never set: it is an operator's guess, and inventing one would be inventing a field.
+- **Output** JSON, validated by Pydantic, exactly **sixteen keys**: hook, problem, promise, offer, cta,
+  persona, pain_point, angle, proof, urgency, awareness_level, funnel_stage, copy_structure, why_it_may_work,
+  plus `language` and `confidence` (`low` / `medium` / `high` -- **not** `med`). Every field is nullable and
+  every one is length-bounded; `extra="forbid"`, frozen. A field the copy does not support is `null`,
+  never invented. `awareness_level` and `funnel_stage` are free strings, not closed enums.
+- **Prompt** requires: structured JSON only, all sixteen keys, `null` permitted, no performance claims of
+  any kind, no ad generation and no rewriting of the competitor's wording, hedged `why_it_may_work`, and
+  safe handling of incomplete copy. **Ad text is fenced and treated as untrusted data** -- an ad instructing
+  the model to report a ROAS is a finding to describe in `copy_structure`, never an instruction to follow.
+- **Retry**: exactly **one** corrective retry on an answer the schema cannot hold, carrying the validation
+  failure and spending no second guess. A second unusable answer stores **no** `ad_analysis` row; the outer
+  `jobs` retry mechanism then decides, as it does for any retryable job failure.
+- **Dedupe**: skip when `(copy_hash, analysis_version)` already has a result. A duplicate is **free** -- it
+  costs no tokens and consumes none of the per-run budget. `ai_max_analyses_per_run` counts analyses
+  scheduled by one `collection_run`; reaching it stops scheduling and is **not** a run failure.
+- **Cost**: provider-reported tokens are stored verbatim; the cost triple is NULL until a documented
+  pricing method exists. Zero is never written in place of unavailable. `AI INTERPRETATION` badge
+  throughout, linking back to the snapshot and `copy_hash` it came from.
+- **Language**: Hindi/Hinglish is analysed in its original language and the analysis fields are written in
+  that same language. **S3.1 has no separate English summary fields** -- see the note below.
+- **Immutable and reusable**: one `ad_analysis` per `(copy_hash, analysis_version)`, written once. A second
+  ad running the same words resolves to it without a second call, which is what makes a creative or
+  platform change free rather than a re-bill (`copy_hash` excludes media and delivery).
+
+**No English summary fields.** `AGENTS.md` section 10 and this section once promised "English summary
+fields produced alongside". No version of the schema ever had one. Adding fourteen `*_en` companions would
+double a contract meant to stay at sixteen names and would force a UI rule about which of two
+translations to trust. English summaries, if ever wanted, arrive as a **new `analysis_version` with its own
+schema** -- never as columns bolted onto v1.
 
 ## API surface (slice 1)
 `/auth/*`, `/competitors`, `/competitors/{id}/pages`, `/collections` (start run, list runs, run detail),

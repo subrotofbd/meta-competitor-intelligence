@@ -13,6 +13,12 @@ even write `result.fetch_fixture()` by accident.
 The mocks are built here exactly as a real provider would be, because they are
 providers. A future real provider becomes one more builder beside these, and
 the choice between them becomes configuration rather than a code change.
+
+**`build_ai_provider` refuses a provider it cannot build.** A configuration
+naming `openai` would otherwise fall through to the mock, and every stored
+analysis would be attributed to `mock-ai` while the operator's settings file
+said something else entirely. That is the quiet substitution this module
+exists to prevent, so it is a loud error rather than a fallback.
 """
 
 from __future__ import annotations
@@ -31,6 +37,11 @@ from app.providers.data.base import AdDataProvider
 from app.providers.data.mock import MockPage, MockProvider
 from app.services.collection import CollectionOrchestrator
 from app.services.jobs import JobQueue, PostgresJobQueue
+
+#: The only AI provider that exists. `AGENTS.md` section 12 forbids an AI SDK in
+#: S0-S3, so a real provider is a later phase and this is the only value
+#: `ai_provider` may name.
+MOCK_AI_PROVIDER_NAME = "mock"
 
 
 def build_ad_provider(
@@ -59,10 +70,22 @@ def build_ai_provider(responses: Mapping[str, CopyAnalysis]) -> AIProvider:
         responses: Stored analyses keyed by `copy_hash`.
 
     Returns:
-        An `AIProvider`. Always the mock in S0.3; no model is configured and no
-        SDK is installed.
+        An `AIProvider`. Always the mock: `AGENTS.md` section 12 forbids an AI
+        SDK in S0-S3, so no real provider exists yet. The model name comes from
+        settings rather than from this module, so adding a real adapter later is a
+        configuration change and not a code change.
     """
-    return MockAIProvider(responses)
+    settings = get_settings()
+    if settings.ai_provider != MOCK_AI_PROVIDER_NAME:
+        # Loud rather than silent. A configuration naming a provider that does not
+        # exist would otherwise fall through to the mock and every stored analysis
+        # would be attributed to `mock-ai` while the operator believed otherwise.
+        raise ValueError(
+            f"ai_provider={settings.ai_provider!r} is not available in this build; "
+            f"only {MOCK_AI_PROVIDER_NAME!r} exists (AGENTS.md section 12 forbids an "
+            f"AI SDK in S0-S3). Configure the mock, or add a provider and register it here."
+        )
+    return MockAIProvider(responses, model=settings.ai_model)
 
 
 def build_job_queue(

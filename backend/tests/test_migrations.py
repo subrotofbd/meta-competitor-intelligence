@@ -46,13 +46,14 @@ def test_history_is_a_single_linear_chain() -> None:
 
     S0.2 asserted a single revision. S1.1 adds the second. S1.2 adds the third.
     S2.1 adds the fourth and the fifth -- the second of those is a repair of the
-    first, not new scope. S2.2 adds the sixth, S2.3 the seventh and S2.4 the
-    eighth. The assertion is the property that survives all of it: a chain with no
-    branch and no gap, so `alembic upgrade head` from `base` reaches the whole
-    schema in order.
+    first, not new scope. S2.2 adds the sixth, S2.3 the seventh, S2.4 the eighth and
+    S3.1 the ninth. The assertion is the property that survives all of it: a chain
+    with no branch and no gap, so `alembic upgrade head` from `base` reaches the
+    whole schema in order.
     """
     script = _script_directory()
     assert [revision.revision for revision in script.walk_revisions()] == [
+        "0009_ai_analysis",
         "0008_media_assets",
         "0007_status_by_context",
         "0006_s2_2_hashes",
@@ -63,7 +64,7 @@ def test_history_is_a_single_linear_chain() -> None:
         "0001_pg_trgm",
     ]
     assert script.get_base() == "0001_pg_trgm"
-    assert list(script.get_heads()) == ["0008_media_assets"]
+    assert list(script.get_heads()) == ["0009_ai_analysis"]
 
 
 def test_every_revision_is_reversible() -> None:

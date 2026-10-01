@@ -1851,3 +1851,129 @@ unavailable.
 Future reporting must support **downloadable competitor-intelligence reports**, and must
 distinguish observed, calculated, provider-reported, client-provided and unavailable metrics.
 **CSV export is future S3 scope.** None of this is implemented in S2.3.
+
+### 13. S3.1 -- AI COPY ANALYSIS: COMPLETE
+
+Migration `0009_ai_analysis`, applied and at head. **References and interpretation only -- no media, no
+external call, no SDK.**
+
+**Scope delivered:** prompt v1, the Pydantic-validated 16-field output contract, language and confidence,
+dedupe by `(copy_hash, analysis_version)`, token tracking, cost tracking, `ai_jobs`, `ad_analysis`, the
+`AIProvider` result wrapper, one retry on invalid output, a per-run analysis cap, null-safe semantics, and
+Hindi/Hinglish original-language analysis.
+
+**`ad_analysis`** -- `UNIQUE(copy_hash, analysis_version)`, `source_ad_id` + `source_ad_snapshot_id` FK
+RESTRICT as **provenance, not identity**, fourteen typed nullable analysis columns plus `language`,
+`confidence`, `provider`, `model`, `prompt_version`. Typed columns rather than the `result JSONB` that
+`ARCHITECTURE.md` once sketched: a blob makes it impossible to check that no performance field exists,
+that each field is length-bounded, or that `confidence` is one of three values. There is **no** `spend`,
+`roas`, `leads`, `conversions`, `reach`, `impressions`, `clicks`, `ctr` or `cpc` column.
+
+**Keyed on copy, not on `ad_id`.** Two advertisers running identical words is a finding -- it is the
+reason `copy_hash` exists. Keying on an ad would force one paid call per advertiser and hide the duplicate.
+Any snapshot with that `copy_hash` resolves to the same analysis, so **a creative, platform or
+`display_format` change costs nothing** (`copy_hash` v1 excludes media and delivery). This is correct
+behaviour and must not be "fixed".
+
+**`ai_jobs` is an AI provider-CALL attempt record, not a second queue.** `job_id -> jobs.id`,
+`UNIQUE(job_id, attempt_no)`. It has **no** `worker_id`, no `lease_expires_at` and no retry counter:
+duplicating those would be a second queue, which `AGENTS.md` section 12 forbids. `jobs` remains the
+queue (`FOR UPDATE SKIP LOCKED`), unchanged.
+
+- **Retry separation is what makes the guarantee structural.** The corrective retry is a second `ai_jobs`
+  row against the same job, never an overwrite, and `ad_analysis` is written on exactly one path -- a
+  validated response. "A retry cannot create duplicate analysis" is therefore a property of the schema,
+  not of care.
+- Two retry layers, deliberately distinct: one corrective retry inside the handler (in `ai_analysis.py`),
+  and the pre-existing `jobs` retry (up to `MAX_ATTEMPTS = 5`) afterwards. Worst case **10 provider calls
+  per analysis**, accepted and recorded rather than optimised away.
+
+**Token and cost.** Provider-reported usage is stored verbatim. A partial report is kept as given rather
+than completed from the parts we have. The cost triple is **all-or-nothing**, mirroring `provider_runs`, and
+is **NULL in S3.1** because no documented pricing method exists -- which is the honest answer, not a gap.
+**Zero is never written in place of unavailable.** Usage is recorded even on a call that failed: the model
+was billed for those tokens whether or not we could use the reply.
+
+**Per-run cap.** `ai_max_analyses_per_run`, `gt=0` so `0` is a startup error rather than a silent
+disabling. Per `collection_run_id`. Counts **analyses scheduled**, not provider calls. **A duplicate
+consumes no budget** -- without that, a re-run over unchanged copy would spend the whole cap finding
+nothing. Reaching the cap stops scheduling and is **not a run failure**: no exception, no error recorded.
+
+**Provider interface.** `analyze_copy` now returns `AIResult(analysis, provider, model, usage)` rather
+than a bare `CopyAnalysis`, which had nowhere to put a token count, a model name, or a provider name, and
+so could not satisfy `AGENTS.md` section 10. `AIUsage` is nullable throughout. Typed errors mirror
+`providers/data/errors.py`: `RateLimited` / `Transient` retryable, `Blocked` / `InvalidResponse` /
+`ResponseTooLarge` terminal, decided by a `retryable` flag and **never by matching an error string**.
+
+**Security.** Ad copy is fenced in the prompt and declared untrusted data; an ad instructing the model to
+report a ROAS or reveal its prompt is a finding for `copy_structure`, not an instruction. `destination_url`
+and media URLs are **never sent** -- untrusted strings with no analytical value, though `copy_hash` still
+covers the URL. The API key is a `SecretStr`, never persisted to `ai_jobs`, `jobs.payload`, or a log, and
+`jobs.payload` carries ids and versions only. `error_message` is truncated to 2000 chars, matching `jobs`.
+No raw prompt and no raw provider response is persisted. `MockAIProvider` reports `usage=None`, because a
+fabricated token count in `ai_jobs` -- the one table whose purpose is to record what the product spent --
+would be the worst possible place to invent a number.
+
+**Concurrency.** `UNIQUE(copy_hash, analysis_version)` absorbs a lost race with `ON CONFLICT DO NOTHING`;
+the loser is handed the winner's id rather than raising. The dedupe check and the enqueue are **not**
+atomic -- `PostgresJobQueue` opens its own session and commits -- and that race is accepted rather than
+closed, because making it atomic would mean bypassing the `JobQueue` Protocol.
+
+**No backfill.** An analysis needs a provider call, and nothing in S2.1-S2.4 recorded that one was made.
+`ads`, `ad_snapshots` and `jobs` are untouched; migration `0009` only creates.
+
+**Documentation corrected** (the contradictions found in the S3.1 PLAN review, and nothing else):
+`AGENTS.md` section 10 and `ARCHITECTURE.md` both promised "English summary fields produced alongside",
+which no version of the schema ever had -- **D-A resolved by correcting the documents, not by adding
+fourteen `*_en` columns**. `ARCHITECTURE.md:13` named `OpenAIProvider` and `GeminiProvider`; neither has
+ever existed. Its `confidence (low/med/high)` was wrong -- the shipped enum is `low`/`medium`/`high`. Its
+"all cards' text joined with markers" input description described a capability that does not exist. Its
+`ad_analysis`/`ai_jobs` sketch was corrected to typed, copy-scoped columns and to call-attempt records.
+
+**Tests:** 51 new in `test_ai_analysis.py`, plus the existing `test_ai_provider.py` updated for the new
+return type (the protocol change is mandated by the contract, so its assertions now read `.analysis`).
+Focused S3.1 suite **51 passed**; AI provider + data provider contracts + errors + mock + job queue
+**120 passed**; S2 media/status/hash/ad-persistence regression **305 passed**; schema/models/migrations +
+collection ordering **passed after updating the revision-chain assertions for `0009`**.
+
+**Six mutations verified, all detected:**
+
+| Mutation | Caught by |
+|---|---|
+| per-run cap never enforced | `test_the_cap_stops_scheduling_without_failing` |
+| dedupe check removed at scheduling | 4 tests, incl. `test_duplicates_do_not_consume_the_budget` |
+| more than one corrective retry | `test_exactly_one_corrective_retry` |
+| retry loop never terminates | `test_a_second_invalid_response_produces_no_analysis` |
+| duplicate analysis clobbers the winner | `test_a_lost_race_keeps_the_winners_row` |
+| `CopyAnalysis` accepts unknown fields | `test_an_unknown_field_is_refused` + `test_ai_provider` |
+
+**Three findings during the build, all real and all fixed:**
+1. A provider that **raised** left no `ai_jobs` row at all -- the failure was invisible in the accounting
+   table. Now every call is recorded, including one that raised, before the error propagates.
+2. Usage reported on a call whose answer was **unusable** was discarded. The model was billed for it, and
+   dropping the figure would make `ai_jobs` understate what S3.1 actually spent.
+3. The post-conflict lookup reused the same function as the pre-insert optimisation, so a test that stubbed
+   the optimisation also broke correctness. Split into `_already_analysed` (optimisation) and
+   `find_existing` (correctness).
+
+**Known limitations:**
+- **No real provider exists.** Everything ran against `MockAIProvider`, which reads stored analyses keyed by
+  `copy_hash`. No prompt has ever been sent to a model. **The prompt is unvalidated against a real model.**
+- **No cost has ever been recorded.** `cost_*` is NULL on every row and no pricing method exists.
+- **No worker exists.** `AGENTS.md` section 3 documents `python -m worker`; there is no such package. S3.1
+  delivers the analysis service, job submission, and a handler callable by a future worker (D-E). Nothing
+  consumes `ai.copy_analysis` jobs yet.
+- **`provider_key` and `copy_hash` stability are unverified** against any real provider.
+- **No English summary fields** -- a deliberate D-A decision, documented in `AGENTS.md` section 10.
+- **`mypy backend` is now at 59 errors**, down from the recorded **61** baseline. S3.1 added **zero**:
+  the two that went away were stale `type: ignore` comments in `test_ai_provider.py`, a file S3.1 had
+  to edit anyway for the `AIResult` return change, and they are now correct. The remaining 59 are
+  pre-existing in S0.3/S1.x test files. The project gate is the `mypy` project config, which is clean.
+- **Windows `TEMP`/`TMP`: 11 pre-existing `PermissionError` errors** in `test_media_store.py` /
+  `test_offline_guard.py` under the default temp path. Set `TEMP`/`TMP` to
+  `C:\Users\DELL\AppData\Local\Temp\opencode` before counting the suite on this machine.
+- **Integration tests require the PostgreSQL container** and are not skipped when it is down.
+
+**Deferred deliberately:** a real AI provider and SDK (needs an `AGENTS.md` section 12 amendment), the
+worker consumer loop, an API surface for triggering analysis, English summary fields, media byte
+acquisition, `S3Store`, and `creative_hash` v2.

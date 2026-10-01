@@ -109,8 +109,12 @@ ignore = [
 # Provider error names are fixed by ARCHITECTURE.md and the S0.3 contract:
 # RateLimited, Blocked, SchemaChanged, Transient. They are written into run
 # records and read by operators, so they are not renamed to satisfy a lint
-# rule. A new exception outside these two modules still needs an Error suffix.
+# rule. A new exception outside these modules still needs an Error suffix.
+# S3.1's AI errors deliberately reuse the same vocabulary -- RateLimited and
+# Blocked mean the same thing to the same operator -- and `error_type` in
+# `ai_jobs` stores these names verbatim.
 "**/app/providers/data/errors.py" = ["N818"]
+"**/app/providers/ai/errors.py" = ["N818"]
 "**/app/services/jobs.py" = ["N818"]
 
 [tool.ruff.lint.isort]

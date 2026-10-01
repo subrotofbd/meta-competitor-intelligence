@@ -219,8 +219,14 @@ that stop running disappear from Meta permanently.
 - The prompt must forbid performance claims. Interpretation only.
 - Deduplicate on `(copy_hash, analysis_version)`. Track tokens and estimated
   cost per call.
-- Hindi/Hinglish copy is analysed in the original language, with English summary
-  fields produced alongside.
+- Hindi/Hinglish copy is analysed in its original language, and the analysis
+  fields are written in that same language. **S3.1 has no separate English
+  summary fields.** This line previously promised "English summary fields
+  produced alongside", which no version of the schema ever had; adding fourteen
+  `*_en` companions would double a contract meant to stay at sixteen names and
+  force a UI rule about which column to trust. English summaries, if ever
+  wanted, arrive as a **new `analysis_version` with its own schema** -- never as
+  columns bolted onto v1.
 - Copy analysis lands in **S3**, not before.
 
 ---

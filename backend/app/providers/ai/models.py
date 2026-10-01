@@ -20,6 +20,33 @@ asserts the field set so a future field cannot be added by accident.
 
 The schema describes how the copy *reads*. `why_it_may_work` is named for the
 uncertainty it carries: it is one reading of the words, not a prediction.
+
+## Language: one set of fields, in the copy's own language
+
+Every analysis field is written in **the language the analysed copy is in**, and
+`language` records which that was. Hindi and Hinglish copy is analysed in
+Hindi/Hinglish.
+
+There are deliberately **no `*_en` companion fields**. `AGENTS.md` section 10
+and `ARCHITECTURE.md` once promised "English summary fields produced alongside";
+no such field has ever existed in this schema, and adding fourteen of them would
+double the contract, force a UI rule about which column to show, and put two
+translations of one interpretation side by side with nothing to say which is
+authoritative. Both documents were corrected to describe what ships. English
+summary generation, if it is ever wanted, is a **new analysis version with its
+own schema** -- not fourteen nullable columns bolted onto v1.
+
+## Why `CopyAnalysis` alone is not what a provider returns
+
+`CopyAnalysis` is the *content*. A provider call also produces facts about the
+call itself -- which model answered, and what it said it was used -- and S3.1 is
+required to track tokens and cost per call (`AGENTS.md` section 10). A bare
+`CopyAnalysis` return had nowhere to put any of that, so the protocol now
+returns `AIResult`, which carries the analysis beside `AIUsage`.
+
+**Usage is nullable throughout and never defaulted to zero.** A provider that
+reports no token counts has told us nothing about cost, and `0` is a claim about
+cost that nobody made.
 """
 
 from __future__ import annotations
@@ -27,6 +54,22 @@ from __future__ import annotations
 from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field
+
+#: Ceiling on one analysis field's text. A fourteen-field reading of a short ad
+#: is a few hundred characters, so this is generous while still bounding a
+#: pathological answer before it reaches a `Text` column. Bounded here rather
+#: than only in the prompt because a prompt instruction is a request and a
+#: `max_length` is a refusal.
+MAX_ANALYSIS_FIELD_CHARS = 2_000
+
+#: ISO-639-ish tag for `language`. Short on purpose: this records what the model
+#: says it wrote in, not a language tag the product validates against a registry.
+MAX_LANGUAGE_CHARS = 32
+
+#: One copy field handed to the model. The same ceiling as an analysis field, for
+#: the same reason: the request is stored nowhere, but a runaway request is a
+#: runaway bill.
+MAX_COPY_FIELD_CHARS = 20_000
 
 
 class Confidence(StrEnum):
@@ -65,18 +108,31 @@ class CopyAnalysisRequest(BaseModel):
             an instruction -- Hindi and Hinglish copy is analysed in its own
             language and summarised in English alongside.
         country: Market the ad ran in, when known.
+        corrective_error: Why the previous answer could not be used, set only for
+            the one permitted retry. `None` on a first ask.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    copy_hash: str = Field(min_length=1)
-    analysis_version: str = Field(min_length=1)
-    primary_text: str | None = None
-    headline: str | None = None
-    description: str | None = None
-    cta: str | None = None
-    language_hint: str | None = None
-    country: str | None = None
+    copy_hash: str = Field(min_length=1, max_length=128)
+    analysis_version: str = Field(min_length=1, max_length=64)
+    primary_text: str | None = Field(default=None, max_length=MAX_COPY_FIELD_CHARS)
+    headline: str | None = Field(default=None, max_length=MAX_COPY_FIELD_CHARS)
+    description: str | None = Field(default=None, max_length=MAX_COPY_FIELD_CHARS)
+    cta: str | None = Field(default=None, max_length=MAX_COPY_FIELD_CHARS)
+    language_hint: str | None = Field(default=None, max_length=MAX_LANGUAGE_CHARS)
+    country: str | None = Field(default=None, min_length=2, max_length=2)
+    corrective_error: str | None = Field(default=None, max_length=1_000)
+    """Set only for the single permitted retry, naming why the last answer failed.
+
+    The `AIProvider` protocol is one method taking a request, so the retry has to
+    travel *in* the request rather than as a second argument: the adapter selects
+    `corrective_prompt` when this is present and `user_prompt` when it is not.
+
+    Carries a Pydantic validation message, which names fields and value types and
+    does not quote the offending input -- so the competitor's copy is not sent back
+    to the provider to be criticised. Asserted by a test, not assumed.
+    """
 
 
 class CopyAnalysis(BaseModel):
@@ -97,8 +153,12 @@ class CopyAnalysis(BaseModel):
         angle: The framing -- urgency, status, fear, curiosity, and so on.
         proof: Claims of evidence: numbers, credentials, demonstrations.
         urgency: Scarcity or time pressure, if present.
-        awareness_level: How familiar the copy assumes the reader is.
-        funnel_stage: Where in the buying path the copy aims.
+        awareness_level: How familiar the copy assumes the reader is. A free
+            string, not an enum, on purpose: a closed vocabulary a model does not
+            hit exactly would spend the single corrective retry and then fail the
+            ad outright, which is a worse outcome than a slightly loose label.
+        funnel_stage: Where in the buying path the copy aims. Free string for the
+            same reason as `awareness_level`.
         copy_structure: How the copy is built, in words.
         why_it_may_work: One reading of why these words might land, framed as
             possibility. Never a result, a forecast, or a verdict.
@@ -108,19 +168,74 @@ class CopyAnalysis(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    hook: str | None = None
-    problem: str | None = None
-    promise: str | None = None
-    offer: str | None = None
-    cta: str | None = None
-    persona: str | None = None
-    pain_point: str | None = None
-    angle: str | None = None
-    proof: str | None = None
-    urgency: str | None = None
-    awareness_level: str | None = None
-    funnel_stage: str | None = None
-    copy_structure: str | None = None
-    why_it_may_work: str | None = None
-    language: str | None = None
+    # Same `MAX_ANALYSIS_FIELD_CHARS` bound on all fourteen. Written out
+    # rather than through a helper so each field's declaration reads the same
+    # way to a person and to a type checker.
+    hook: str | None = Field(default=None, max_length=MAX_ANALYSIS_FIELD_CHARS)
+    problem: str | None = Field(default=None, max_length=MAX_ANALYSIS_FIELD_CHARS)
+    promise: str | None = Field(default=None, max_length=MAX_ANALYSIS_FIELD_CHARS)
+    offer: str | None = Field(default=None, max_length=MAX_ANALYSIS_FIELD_CHARS)
+    cta: str | None = Field(default=None, max_length=MAX_ANALYSIS_FIELD_CHARS)
+    persona: str | None = Field(default=None, max_length=MAX_ANALYSIS_FIELD_CHARS)
+    pain_point: str | None = Field(default=None, max_length=MAX_ANALYSIS_FIELD_CHARS)
+    angle: str | None = Field(default=None, max_length=MAX_ANALYSIS_FIELD_CHARS)
+    proof: str | None = Field(default=None, max_length=MAX_ANALYSIS_FIELD_CHARS)
+    urgency: str | None = Field(default=None, max_length=MAX_ANALYSIS_FIELD_CHARS)
+    awareness_level: str | None = Field(default=None, max_length=MAX_ANALYSIS_FIELD_CHARS)
+    funnel_stage: str | None = Field(default=None, max_length=MAX_ANALYSIS_FIELD_CHARS)
+    copy_structure: str | None = Field(default=None, max_length=MAX_ANALYSIS_FIELD_CHARS)
+    why_it_may_work: str | None = Field(default=None, max_length=MAX_ANALYSIS_FIELD_CHARS)
+    language: str | None = Field(default=None, max_length=MAX_LANGUAGE_CHARS)
     confidence: Confidence | None = None
+
+
+class AIUsage(BaseModel):
+    """What a provider said this call used.
+
+    Every field is nullable and none defaults to a number. A provider that
+    reports no usage has told us nothing about what the call cost, and writing
+    `0` would be inventing a cost claim nobody made -- which is the same failure
+    as inventing an analysis field, one level down.
+
+    A partially-reported usage is kept as given: `total_tokens` present with the
+    prompt and completion counts absent is a real shape some providers return,
+    and filling the gaps from the parts we do have would be arithmetic dressed up
+    as a report.
+
+    Attributes:
+        prompt_tokens: Tokens the provider billed for the request.
+        completion_tokens: Tokens the provider billed for the answer.
+        total_tokens: The provider's own total, when it states one.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    prompt_tokens: int | None = Field(default=None, ge=0)
+    completion_tokens: int | None = Field(default=None, ge=0)
+    total_tokens: int | None = Field(default=None, ge=0)
+
+
+class AIResult(BaseModel):
+    """One provider call's answer, and what is known about the call.
+
+    Wraps `CopyAnalysis` rather than extending it, because the analysis is the
+    content and everything else here is a fact *about* producing it. Keeping them
+    apart is what stops a token count from ever being mistaken for a field the
+    competitor's ad said.
+
+    Attributes:
+        analysis: The validated interpretation.
+        provider: Stable provider name, recorded with the analysis so a stored
+            result can always be traced to what produced it.
+        model: The model that answered, or `None` when the provider reports none.
+            Never a hard-coded name: it comes from settings.
+        usage: What the provider reported it used, or `None` when it reported
+            nothing at all.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    analysis: CopyAnalysis
+    provider: str = Field(min_length=1, max_length=64)
+    model: str | None = Field(default=None, max_length=128)
+    usage: AIUsage | None = None

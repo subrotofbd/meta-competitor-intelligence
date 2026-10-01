@@ -40,6 +40,14 @@ DEFAULT_COLLECTION_MAX_RECORDS_PER_RUN = 10_000
 DEFAULT_COLLECTION_MAX_PAGES_PER_RUN = 200
 DEFAULT_COLLECTION_STALE_RUN_TIMEOUT = timedelta(minutes=30)
 
+#: Bounds on one AI analysis run. Same reasoning as the collection bounds: an
+#: operation budget, not a product claim. There is no number of ads a competitor
+#: "should" have analysed, and putting one in a config file would be a business
+#: judgement dressed as a setting.
+DEFAULT_AI_MAX_ANALYSES_PER_RUN = 50
+DEFAULT_AI_ANALYSIS_TIMEOUT_SECONDS = 60
+DEFAULT_AI_MAX_RESPONSE_CHARS = 64_000
+
 
 class AppEnv(StrEnum):
     """Deployment environment. Selects defaults and turns on safety checks."""
@@ -138,6 +146,48 @@ class Settings(BaseSettings):
     #: would make every legitimately long run look abandoned, which is a
     #: config typo that silently fails runs, so it is a startup error.
     collection_stale_run_timeout: timedelta = DEFAULT_COLLECTION_STALE_RUN_TIMEOUT
+
+    # ---- AI copy analysis settings --------------------------------------
+    #
+    # S3.1 ships no SDK and no real provider (`AGENTS.md` section 12 forbids one
+    # in S0-S3), so the only provider that can be configured here is the mock.
+    # The settings exist now so that adding a real provider later is a
+    # configuration change rather than a code change, and so that the *bounds*
+    # -- which matter regardless of provider -- are settled and visible.
+
+    #: Which copy-analysis provider to build. `AGENTS.md` section 49 keeps model
+    #: names out of business logic, and this is where the choice is made.
+    ai_provider: str = "mock"
+
+    #: The model identifier handed to the provider. NULL means "whatever the
+    #: provider reports", which is the honest answer when it reports nothing.
+    #: Never a production model name written into a service.
+    ai_model: str | None = None
+
+    #: The provider credential. `SecretStr` for the same reason `database_url`
+    #: is: a key that cannot be interpolated into a log line cannot leak into one
+    #: by accident. It is never persisted -- not in `ai_jobs`, not in
+    #: `jobs.payload`, not anywhere -- and `AGENTS.md` section 6 forbids pointing
+    #: a provider at a plaintext `http://` endpoint while holding one.
+    ai_api_key: SecretStr | None = None
+
+    #: How many ads one collection run may have analysed.
+    #:
+    #: Counts analyses **scheduled by this run**, not provider calls, and a
+    #: duplicate `(copy_hash, analysis_version)` costs nothing and consumes
+    #: nothing -- a re-run over unchanged copy schedules nothing at all. Reaching
+    #: the cap is a budget decision, not a run failure: no error is raised and no
+    #: run is marked failed, because the ads simply have not been analysed yet.
+    ai_max_analyses_per_run: int = Field(default=DEFAULT_AI_MAX_ANALYSES_PER_RUN, gt=0)
+
+    #: How long one provider call may take before it is treated as transient.
+    #: A model that has not answered in a minute is not going to answer the same
+    #: question usefully on the next attempt either.
+    ai_analysis_timeout_seconds: int = Field(default=DEFAULT_AI_ANALYSIS_TIMEOUT_SECONDS, gt=0)
+
+    #: The largest answer accepted, checked **before** any JSON parsing, so a
+    #: pathological response costs a length comparison rather than a parse.
+    ai_max_response_chars: int = Field(default=DEFAULT_AI_MAX_RESPONSE_CHARS, gt=0)
 
     @field_validator("database_url")
     @classmethod

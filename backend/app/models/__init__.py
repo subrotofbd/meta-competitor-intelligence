@@ -10,7 +10,10 @@ Tables arrive per checkpoint:
         `ads` cannot hold it (see the module docstring). No column on `ads`
   S2.4  media_assets + ad_snapshot_media -- creative *references* only. No bytes
         are acquired, so `storage_key` is NULL on every row (see below)
-  S3.1  ad_analysis, ai_jobs
+  S3.1  ad_analysis (immutable, keyed on copy_hash + analysis_version, so one
+        analysis is shared by every ad running that copy) + ai_jobs (one row per
+        AI provider CALL attempt, referencing the existing `jobs` queue -- not a
+        second queue)
 
 **SUPERSEDED -- an earlier charter listed five S2.2 tables: `ad_creatives`,
 `ad_platforms`, `ad_countries`, `landing_pages`, `media_assets`.** That claim was
@@ -73,6 +76,7 @@ Importing this package registers every table on `Base.metadata`, which is what
 
 from app.models.ad_status import AdStatusByContext
 from app.models.ads import Ad, AdSnapshot, SeenInRun
+from app.models.analysis import AdAnalysis, AIJob
 from app.models.jobs import Job
 from app.models.media import AdSnapshotMedia, MediaAsset
 from app.models.mixins import CountryCodeMixin, TimestampMixin, UuidPrimaryKeyMixin
@@ -86,7 +90,9 @@ from app.models.runs import (
 from app.models.tracking import Competitor, FacebookPage
 
 __all__ = [
+    "AIJob",
     "Ad",
+    "AdAnalysis",
     "AdSnapshot",
     "AdSnapshotMedia",
     "AdStatusByContext",
