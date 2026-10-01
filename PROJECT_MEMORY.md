@@ -1648,13 +1648,110 @@ Every mutation was reverted and the file verified byte-intact.
 - **No real provider exists.** Everything has run against `MockProvider`. No API, no auth, no
   frontend, no reporting.
 
-### 11. S2.4 -- NOT STARTED
+### 11. S2.4 -- MEDIA REFERENCES: COMPLETE
 
-No `media_assets`, no media byte downloads, no byte hashing. `AGENTS.md` section 12 forbids byte
-downloads in S0-S3, so `creative_hash` v1 remains a **provider-key identity**: two ads re-served
-under a rotated key look different to it, and a creative duplicate is a hint rather than proof.
-When S2.4 lands, byte hashing becomes `creative_hash` **v2** and reinterprets no stored
-`s2.2-creative-v1` value. Do not begin without explicit human approval.
+Migration `0008_media_assets`, applied and at head. Two tables, **references only**.
+
+**`media_assets`** -- `(provider, provider_key)` unique, `source_url`, `mime`, `width`, `height`,
+`duration_seconds NUMERIC`, `storage_key`, `byte_size`, `first_seen_at`, `last_seen_at`.
+**No foreign key out of it**: an asset is shared identity, and the committed corpus proves it
+(`mock-media-shared-01` is on two different ads). **No `sha256`, no `bytes`, no `downloaded_at`** --
+`ARCHITECTURE.md` once listed all three and none can be built, because `AGENTS.md` section 12
+forbids media byte downloads in S0-S3.
+
+- **`storage_key` is NULL on every row S2.4 creates, and that NULL means exactly one thing:**
+  *a reference is held, the bytes have not been acquired*. Not "unknown", not "pending", not zero.
+  A `CHECK` accepts a valid 64-lowercase-hex key for a future byte-acquisition checkpoint and
+  refuses every other shape while letting NULL through.
+- **`provider_key` is an identity hint, not cryptographic proof.** No real provider has been run
+  against this product, so key stability is unverified. A changed key creates a **distinct** asset
+  row; the two are deliberately not merged, because without the bytes there is no way to know they
+  are the same and guessing would be a fabricated finding.
+- **`creative_hash` v1 (`s2.2-creative-v1`) is unchanged and NOT byte-based.** It hashes sorted
+  provider keys. Byte hashing would be a `creative_hash` **v2** in a later, separately approved
+  checkpoint. Nothing was reinterpreted, recomputed or backfilled.
+
+**`ad_snapshot_media`** -- `ad_snapshot_id` FK RESTRICT, `media_asset_id` FK RESTRICT, nullable
+`position SMALLINT`, `UNIQUE(ad_snapshot_id, media_asset_id)`,
+`CHECK(position IS NULL OR position >= 0)`. The many-to-many observation link, the same shape as
+`seen_in_run`. Both FKs are RESTRICT, never CASCADE.
+
+**Indexes:** exactly two -- `ix_media_assets_first_seen_at` and `ix_ad_snapshot_media_media_asset_id`.
+Deliberately **no** second index on `ad_snapshot_id`: the unique constraint already leads with it.
+
+**Write path:** `ad_persistence._persist_one` calls `services/media_references.link_snapshot_media`
+after the snapshot flush, in the **same transaction**, so a media failure rolls the snapshot back
+with it. It runs on **every** observation, not only when a snapshot was created -- an unchanged ad
+seen again is a fresh observation of its assets and `last_seen_at` must move. `first_seen_at` is
+never rewritten; `last_seen_at` moves forward only (`greatest(last_seen_at, now())`). Both writes
+are upserts on their unique constraints, so reprocessing is idempotent. Zero media writes nothing.
+`position` is the provider-order index and **never feeds a digest** -- `content_hash` v1 and
+`creative_hash` v1 both *sort* media keys.
+
+- `position` **is** re-derived on a later write, and that is load-bearing rather than incidental:
+  `content_hash` sorts media keys, so a provider reshuffle yields an identical digest and therefore
+  **the same snapshot**. The links are then re-derived against provider order. Writing `position`
+  only on insert would leave every row describing whichever observation arrived first.
+
+**No download guarantee:** nothing calls a `MediaStore`, no upload, no fetch, no hash of bytes, no
+remote request. `source_url` is stored verbatim and never requested (`DATA_ACCESS.md` records these
+URLs expire, so it is a note of where an asset *was*, not a promise it can be retrieved).
+
+**Security (`source_url`):** a media URL carrying a `user:password@` userinfo component is **refused**
+by `_read_media`, with a **fixed** error message that never quotes the value -- `detail` is
+documented safe to log and reaches `_describe` and `collection_runs.error_message`, so echoing it
+would write the token into the database. The raw response still holds the payload, so the cost is
+one record, never the evidence. The check is bounded to the authority component, so
+`/asset@v2.png` and `?email=user@host` are still accepted. **`destination_url` is deliberately
+NOT refused** -- S1.3 settled that a destination carrying userinfo is stored verbatim and
+`test_a_url_with_a_port_or_credentials_is_stored_verbatim` pins it; S2.4 does not own that field.
+
+**No backfill.** Snapshots written before `0008` gain no links and are not touched; their media
+stays in `ad_snapshots.normalized`, which remains authoritative for them. `ads` and `ad_snapshots`
+were not altered at all -- the migration only creates.
+
+**Tests:** 61 new (36 `test_media_references.py`, 19 `test_media_url_security.py`, 6 schema).
+Full suite **957 passed** (was 896). `ruff check`/`format` clean. Project-gate `mypy` clean;
+`mypy backend` back at its **61-error** pre-existing baseline with zero from S2.4.
+
+**Five mutations verified, all detected:**
+
+| Mutation | Caught by |
+|---|---|
+| `position` never written | `test_provider_order_is_preserved_in_position` |
+| `position` not re-derived on a provider reorder | `test_position_follows_a_provider_reorder_of_the_same_snapshot` |
+| provider order discarded (position from sorted keys) | same |
+| `first_seen_at` refreshed on upsert | `test_first_seen_at_survives_a_deliberately_wrong_value` |
+| userinfo guard disabled | 11 failures in `test_media_url_security.py` |
+
+Three of these **initially did not fail**, and the reasons are worth keeping:
+
+1. Comparing two `now()` values cannot detect an upsert that refreshes `first_seen_at` -- both
+   writes land in the same clock second. The test now plants a sentinel from the past.
+2. Nothing exercised a provider *reorder*, so `position` re-derivation was untested.
+3. `_assets`/`_links` returned identity-mapped ORM objects without refreshing them, so a read after
+   a write returned pre-write values. Both helpers now `expire_all()`.
+
+**Known limitations, unchanged by this checkpoint:**
+
+- **`provider_key` stability is unverified.** No real provider has been run. If a provider rotates a
+  key for an asset it is still serving, that is a second row and `creative_hash` v1 reports a
+  difference that may not be one. Accepted for S2.4; no cross-key identity logic was invented.
+- **No bytes, so no byte identity.** Nothing here can detect that two differently-keyed assets are
+  the same file, or that a re-keyed asset is the same one.
+- **`source_url` will expire.** It is a historical note, not a retrieval handle.
+- **`mypy backend` has 61 pre-existing errors** in S0.3/S1.x test files. Recorded baseline, not a
+  regression; S2.4 contributes zero. The project gate is the `mypy` project config, which is clean.
+- **Windows `TEMP`/`TMP`: 11 pre-existing `PermissionError` errors** in `test_media_store.py` /
+  `test_offline_guard.py` under the default temp path. Set `TEMP`/`TMP` to
+  `C:\Users\DELL\AppData\Local\Temp\opencode` before counting the suite on this machine.
+- **Integration tests require the PostgreSQL container** and are not skipped when it is down.
+- **No real provider exists.** Everything has run against `MockProvider`. No API, no auth, no
+  frontend, no reporting.
+
+**Deferred deliberately:** `ad_creatives` (needs a normalizer change first -- only `bodies[0]` is
+read), `ad_platforms`, `ad_countries`, `landing_pages`, media byte acquisition, thumbnails, ffmpeg,
+`S3Store`, `creative_hash` v2.
 
 ### 12. Future S3 AI Campaign Advisor and reporting -- RECORDED, NOT IMPLEMENTED
 

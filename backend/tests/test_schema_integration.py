@@ -67,6 +67,7 @@ S21_REVISION = "0004_ad_history"
 S21_FIX_REVISION = "0005_ads_data_origin_check"
 S22_REVISION = "0006_s2_2_hashes"
 S23_REVISION = "0007_status_by_context"
+S24_REVISION = "0008_media_assets"
 BASE_REVISION = "0001_pg_trgm"
 
 NOW = datetime(2026, 9, 30, 9, 0, tzinfo=UTC)
@@ -134,15 +135,134 @@ def test_the_migration_applies_and_leaves_one_head() -> None:
     assert len(ScriptDirectory.from_config(_config()).get_heads()) == 1
     with get_engine().connect() as connection:
         applied = connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-    assert applied == S23_REVISION
+    assert applied == S24_REVISION
 
 
-def test_s23_extends_the_s22_revision_rather_than_branching() -> None:
-    """Seven revisions, one chain. Two heads means no single `upgrade` reaches it."""
+def test_the_s24_downgrade_renders_complete_sql_without_executing_it() -> None:
+    """Both tables dropped, rendered offline.
+
+    `ad_snapshot_media` first: it holds the foreign keys, so dropping `media_assets`
+    first would leave the link table referring to a table that no longer exists.
+    """
+    buffer = io.StringIO()
+    with redirect_stdout(buffer):
+        command.downgrade(_config(), f"{S24_REVISION}:{S23_REVISION}", sql=True)
+    sql = buffer.getvalue()
+
+    assert "DROP TABLE ad_snapshot_media" in sql
+    assert "DROP TABLE media_assets" in sql
+    assert "DROP INDEX ix_ad_snapshot_media_media_asset_id" in sql
+    assert "DROP INDEX ix_media_assets_first_seen_at" in sql
+    assert sql.index("DROP TABLE ad_snapshot_media") < sql.index("DROP TABLE media_assets")
+
+
+def test_the_s24_tables_exist_with_their_expected_columns() -> None:
+    """Read from `information_schema`, so this is the database's own shape.
+
+    Notably absent: `bytes`, `sha256` and `downloaded_at`. S2.4 acquires no media,
+    so no column that would record an acquisition exists -- an empty one would
+    invite a future reader to invent a value.
+    """
+    expected = {
+        "media_assets": {
+            "id",
+            "created_at",
+            "updated_at",
+            "provider",
+            "provider_key",
+            "source_url",
+            "mime",
+            "width",
+            "height",
+            "duration_seconds",
+            "storage_key",
+            "byte_size",
+            "first_seen_at",
+            "last_seen_at",
+        },
+        "ad_snapshot_media": {
+            "id",
+            "created_at",
+            "updated_at",
+            "ad_snapshot_id",
+            "media_asset_id",
+            "position",
+        },
+    }
+    forbidden = {"bytes", "sha256", "downloaded_at", "content_sha256"}
+
+    with get_engine().connect() as connection:
+        for table, columns in expected.items():
+            installed = {
+                str(row[0])
+                for row in connection.execute(
+                    text(
+                        "SELECT column_name FROM information_schema.columns "
+                        "WHERE table_name = :table"
+                    ),
+                    {"table": table},
+                )
+            }
+            assert installed == columns, table
+            assert not (installed & forbidden), f"{table} has an acquisition column"
+
+
+def test_the_s24_indexes_exist_in_the_database() -> None:
+    """Both, and no speculative extras.
+
+    `ix_ad_snapshot_media_media_asset_id` serves the reverse direction; the
+    `UNIQUE (ad_snapshot_id, media_asset_id)` already leads with the snapshot, so
+    a second index on that column would be duplicate work.
+    """
+    with get_engine().connect() as connection:
+        installed = {
+            str(row[0])
+            for row in connection.execute(
+                text(
+                    "SELECT indexname FROM pg_indexes "
+                    "WHERE tablename IN ('media_assets', 'ad_snapshot_media')"
+                )
+            )
+        }
+
+    assert "ix_media_assets_first_seen_at" in installed
+    assert "ix_ad_snapshot_media_media_asset_id" in installed
+    # No index on `ad_snapshot_id` alone, beyond the unique constraint's own.
+    assert not any(name.startswith("ix_ad_snapshot_media_ad_snapshot") for name in installed), (
+        "a second index on ad_snapshot_id duplicates the unique constraint"
+    )
+
+
+def test_media_assets_carries_no_foreign_key() -> None:
+    """An asset is shared identity, and this is what keeps it shared.
+
+    The committed corpus has `mock-media-shared-01` referenced by two different
+    ads. A foreign key from `media_assets` to `ads` would either duplicate that
+    asset per ad or force a canonical owner -- both fabrications.
+    """
+    with get_engine().connect() as connection:
+        count = connection.execute(
+            text(
+                "SELECT count(1) FROM pg_constraint "
+                "WHERE conrelid = 'media_assets'::regclass AND contype = 'f'"
+            )
+        ).scalar_one()
+
+    assert count == 0, "media_assets must not be owned by an ad or a snapshot"
+
+
+def test_the_revision_history_is_one_unbranched_chain() -> None:
+    """Eight revisions, one chain. Two heads means no single `upgrade` reaches it.
+
+    Asserted as a whole rather than one link per checkpoint: a partial chain check
+    passes even when a later revision branches off, and the failure it would miss is
+    the one that strands a database at a revision no command reaches.
+    """
     script = ScriptDirectory.from_config(_config())
     revisions = {revision.revision: revision.down_revision for revision in script.walk_revisions()}
 
     assert revisions == {
+        S24_REVISION: S23_REVISION,
         S23_REVISION: S22_REVISION,
         S22_REVISION: S21_FIX_REVISION,
         S21_FIX_REVISION: S21_REVISION,
@@ -151,6 +271,7 @@ def test_s23_extends_the_s22_revision_rather_than_branching() -> None:
         S11_REVISION: BASE_REVISION,
         BASE_REVISION: None,
     }
+    assert list(script.get_heads()) == [S24_REVISION]
 
 
 def test_the_s23_downgrade_renders_complete_sql_without_executing_it() -> None:
@@ -476,9 +597,9 @@ def _ad_id(session: Session, run: CollectionRun, meta_ad_id: str = "ad-0001") ->
 def test_s21_extends_the_s12_revision_rather_than_branching() -> None:
     """One linear lineage. Two heads means no single `upgrade` reaches the schema.
 
-    The chain is asserted in full by `test_s23_extends_the_s22_revision_rather_
-    than_branching` above; this keeps the S2.1 link named, because that is the
-    revision that introduced the tables every later one builds on.
+    The chain is asserted in full by `test_the_revision_history_is_one_unbranched_
+    chain` above; this keeps the S2.1 link named, because that is the revision
+    that introduced the tables every later one builds on.
     """
     script = ScriptDirectory.from_config(_config())
     revisions = {revision.revision: revision.down_revision for revision in script.walk_revisions()}

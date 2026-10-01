@@ -62,8 +62,13 @@ S22_TABLES: frozenset[str] = frozenset()
 #: as a literal so a fourth table appearing here is scope nobody approved.
 S23_TABLES: frozenset[str] = frozenset({"ad_status_by_context"})
 
-#: The cumulative S2 scope, which is everything that exists after S2.3.
-S2_TABLES = S1_TABLES | S21_TABLES | S22_TABLES | S23_TABLES
+#: S2.4 adds exactly two tables. **No columns on `ads` or `ad_snapshots`** -- the
+#: media reference is promoted out of `ad_snapshots.normalized` into rows beside
+#: the evidence, and the evidence itself is not altered.
+S24_TABLES: frozenset[str] = frozenset({"media_assets", "ad_snapshot_media"})
+
+#: The cumulative S2 scope, which is everything that exists after S2.4.
+S2_TABLES = S1_TABLES | S21_TABLES | S22_TABLES | S23_TABLES | S24_TABLES
 
 S11_MODELS = (Competitor, FacebookPage, CollectionRun, ProviderRun, RawResponse)
 

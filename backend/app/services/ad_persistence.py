@@ -62,6 +62,7 @@ from app.providers.data.provenance import DataOrigin
 from app.services.content_hash import content_hash_v1
 from app.services.copy_hash import copy_hash_v1
 from app.services.creative_hash import creative_hash_v1
+from app.services.media_references import link_snapshot_media
 from app.services.status_evaluator import provider_active_from, record_observation
 
 
@@ -307,6 +308,21 @@ def _persist_one(
         country=country,
         provider_active=provider_active_from(record.ad_status),
         last_status_run_id=run_id,
+    )
+
+    # S2.4: promote the record's media references into rows, in the same
+    # transaction as the snapshot. A failure here rolls the snapshot back with it,
+    # so a link can never outlive the observation that justifies it.
+    #
+    # This runs on *every* observation, not only when a snapshot was created. An
+    # unchanged ad seen again is still a fresh observation of its assets, and
+    # `last_seen_at` has to move -- an asset's recency is a fact about the run, not
+    # about when the copy last changed.
+    link_snapshot_media(
+        session,
+        provider=provider,
+        ad_snapshot_id=snapshot_id,
+        media=record.media,
     )
 
     return PersistedObservation(

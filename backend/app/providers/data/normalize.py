@@ -359,6 +359,18 @@ def _read_url(raw: Mapping[str, Any], key: str) -> str | None:
     is on. What this module guarantees is the narrower thing the record depends
     on: a stored URL is a syntactically whole http(s) URL, not a fragment that
     looked plausible enough to keep.
+
+    ## Userinfo is deliberately NOT refused here
+
+    A destination URL may legitimately carry `user:password@`, and S1.3 settled
+    that such a URL is stored verbatim rather than normalised into something the
+    provider did not send. A test named for that decision pins it exactly.
+
+    **Media URLs are a different field with a different rule.** `_read_media`
+    refuses a credential-bearing `url`, because S2.4 promotes it into
+    `media_assets.source_url` -- a column that gets queried, rendered and
+    exported. Putting the rule here instead would have overturned a settled S1.3
+    decision about a field S2.4 does not own.
     """
     value = raw.get(key)
     if value is None:
@@ -382,6 +394,30 @@ def _read_url(raw: Mapping[str, Any], key: str) -> str | None:
     if not _has_host(value):
         raise _reject(NormalizationErrorKind.INVALID_URL, key, "no host")
     return value
+
+
+def _has_userinfo(value: str) -> bool:
+    """Whether the URL's authority carries a `user:password@` component.
+
+    A deliberate string check rather than `urllib.parse`: `urllib` is on the
+    offline guard's blocklist for this package, because a provider package that
+    cannot open a socket has no business importing a URL parser either -- it
+    could only ever be used to read a string.
+
+    The search is bounded to the authority, between the scheme's `//` and the
+    first `/`, `?` or `#`. An `@` in the path or query is a legal character there
+    and means nothing about credentials, so a whole-string scan would refuse URLs
+    that carry no secret at all.
+    """
+    start = value.find("//")
+    if start == -1:
+        return False
+    authority = value[start + 2 :]
+    for terminator in ("/", "?", "#"):
+        cut = authority.find(terminator)
+        if cut != -1:
+            authority = authority[:cut]
+    return "@" in authority
 
 
 def _read_display_format(raw: Mapping[str, Any]) -> AdFormat | None:
@@ -466,10 +502,42 @@ def _read_media(body: Mapping[str, Any]) -> tuple[MediaRef, ...]:
                 NormalizationErrorKind.MISSING_IDENTITY, f"media[{position}].key", "absent or blank"
             )
         try:
+            source_url = _read_url(entry, "url")
+            if source_url is not None and _has_userinfo(source_url):
+                # S2.4 refuses a credential-bearing media URL specifically.
+                #
+                # `https://user:token@host/a.png` passes every other check here --
+                # it is a valid http(s) URL with a host. But the password is a
+                # secret the provider handed us, and S2.4 promotes `source_url`
+                # from a value nested inside `raw_responses` into a first-class
+                # column that gets queried, rendered and exported.
+                #
+                # Refused rather than stripped, for the same reason a control
+                # character is: stripping would mean storing a URL the provider
+                # did not send, and a secret is not something to normalise into
+                # something harmless.
+                #
+                # The message is fixed and deliberately does **not** quote the
+                # value. `detail` is documented as safe to log and reaches
+                # `_describe` and the run's `error_message`, so echoing the URL
+                # would write the token into the database.
+                #
+                # The raw response still holds the payload -- committed before
+                # anything read it -- so the cost is this one record, never the
+                # evidence.
+                #
+                # `destination_url` is NOT treated this way. S1.3 settled that a
+                # destination carrying userinfo is stored verbatim, and S2.4 does
+                # not own that field.
+                raise _reject(
+                    NormalizationErrorKind.INVALID_URL,
+                    f"media[{position}].url",
+                    "carries userinfo credentials, which are never stored",
+                )
             media.append(
                 MediaRef(
                     provider_key=key,
-                    source_url=_read_url(entry, "url"),
+                    source_url=source_url,
                     mime=_read_typed(entry, "mime", (str,)),
                     width=_read_typed(entry, "width", _MEDIA_INTEGERS),
                     height=_read_typed(entry, "height", _MEDIA_INTEGERS),

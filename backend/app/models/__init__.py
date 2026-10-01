@@ -8,12 +8,14 @@ Tables arrive per checkpoint:
         `creative_hash` -- plus duplicate detection grouping over them
   S2.3  ad_status_by_context -- status per ad *per Page + country*, because
         `ads` cannot hold it (see the module docstring). No column on `ads`
+  S2.4  media_assets + ad_snapshot_media -- creative *references* only. No bytes
+        are acquired, so `storage_key` is NULL on every row (see below)
   S3.1  ad_analysis, ai_jobs
 
 **SUPERSEDED -- an earlier charter listed five S2.2 tables: `ad_creatives`,
 `ad_platforms`, `ad_countries`, `landing_pages`, `media_assets`.** That claim was
-removed from the list above so it cannot be read as current scope. None of the
-five was built, and here is why each stands deferred:
+removed from the list above so it cannot be read as current scope. **Four remain
+deferred; `media_assets` was built in S2.4.**
 
   - `ad_creatives` cannot be built honestly yet.
     `app/providers/data/normalize.py` reads only the first creative body and
@@ -23,14 +25,17 @@ five was built, and here is why each stands deferred:
     record observations. It needs a normalizer change first, which is its own
     checkpoint.
   - `ad_platforms`, `ad_countries` and `landing_pages` are per-dimension
-    targeting tables, which S2.2 did not attempt.
-  - `media_assets` is S2.4. `AGENTS.md` section 12 forbids media byte downloads in
-    S0-S3, so `creative_hash` v1 is a *provider-key identity* and not a byte
-    digest. When S2.4 lands, byte hashing becomes `creative_hash` v2 and no stored
-    `s2.2-creative-v1` value is reinterpreted.
+    targeting tables, not attempted by S2.2 or S2.4.
+  - `media_assets` **was** built, in S2.4 -- as creative *references*, not bytes.
+    `AGENTS.md` section 12 forbids media byte downloads in S0-S3, so every row has
+    `storage_key = NULL`, meaning "a reference is held, the bytes have not been
+    acquired". `creative_hash` v1 remains a **provider-key** digest and is not
+    reinterpreted; byte-based hashing would be a `creative_hash` v2 in a later,
+    separately approved checkpoint. No `bytes`, `sha256` or `downloaded_at` column
+    exists, because none could be truthfully populated.
 
 This note is here because a stale charter is worse than no charter: a reader who
-trusted the old S2.2 line would treat five unbuilt tables as approved scope.
+trusted the old S2.2 line would treat unbuilt tables as approved scope.
 
 `users`, `settings` and `audit_logs` appear in `ARCHITECTURE.md` under slice-1
 "Identity" but are assigned to no checkpoint here, and they are deliberately
@@ -60,6 +65,7 @@ Importing this package registers every table on `Base.metadata`, which is what
 from app.models.ad_status import AdStatusByContext
 from app.models.ads import Ad, AdSnapshot, SeenInRun
 from app.models.jobs import Job
+from app.models.media import AdSnapshotMedia, MediaAsset
 from app.models.mixins import CountryCodeMixin, TimestampMixin, UuidPrimaryKeyMixin
 from app.models.runs import (
     CollectionRun,
@@ -73,6 +79,7 @@ from app.models.tracking import Competitor, FacebookPage
 __all__ = [
     "Ad",
     "AdSnapshot",
+    "AdSnapshotMedia",
     "AdStatusByContext",
     "CollectionRun",
     "CollectionRunStatus",
@@ -80,6 +87,7 @@ __all__ = [
     "CountryCodeMixin",
     "FacebookPage",
     "Job",
+    "MediaAsset",
     "ProviderRun",
     "ProviderRunStatus",
     "RawResponse",

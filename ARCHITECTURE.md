@@ -10,7 +10,9 @@ scope and only leaves seams. See IMPLEMENTATION_PLAN.md.
 - Backend: Python 3.12, FastAPI, SQLAlchemy 2, Alembic, Pydantic v2.
 - DB: PostgreSQL 16 (also used as the job queue via `SELECT ... FOR UPDATE SKIP LOCKED`, so no Redis in slice 1).
 - Worker: same Python package, separate entrypoint (`python -m worker`). Scheduler + queue consumer.
-- Media: `MediaStore` interface with `LocalFsStore` (dev) and `S3Store` (MinIO/S3/R2). Content-addressed keys.
+- Media: `MediaStore` interface with `LocalFsStore` (dev); `S3Store` (MinIO/S3/R2) is a later checkpoint.
+  Content-addressed keys. **No media bytes are acquired in S0-S3**, so nothing calls a `MediaStore` yet and
+  `media_assets.storage_key` is always NULL. `creative_hash` v1 hashes **provider keys**, not bytes.
 - AI: `AIProvider` interface; `OpenAIProvider`, `GeminiProvider`. Model names come from settings, never hard-coded.
 - Deployment: Docker Compose (postgres, minio optional, backend, worker, frontend). Windows via Docker Desktop/WSL2.
 
@@ -67,8 +69,12 @@ snapshot id -- **no `current_status`: see Historical tracking rules, it lives pe
 `ad_status_by_context`**), **`ad_snapshots`** (immutable, one row per ad per run seen: run_id, normalized JSONB, copy_hash,
 creative_hash, content_hash, provider status fields, `raw_ref`), `ad_status_by_context`(ad + page + country; `seen` /
 `not_seen_since` / `presumed_inactive`, provider_active, not_seen_since_at), `ad_creatives`(cards/formats, card_key -- **DEFERRED, not built**),
-`media_assets`(sha256 unique, mime, bytes, width/height, storage_key, source_url, downloaded_at),
-`ad_platforms`, `ad_countries`, `landing_pages`(canonical URL only in slice 1).
+`media_assets`(`provider` + `provider_key` unique, source_url, mime, width/height, duration_seconds, storage_key,
+byte_size, first_seen_at/last_seen_at -- **references only, no bytes: S0-S3 forbids media acquisition, so
+storage_key and byte_size are always NULL and there is no sha256/bytes/downloaded_at column**),
+`ad_snapshot_media`(snapshot + asset, position -- the many-to-many observation link; an asset is shared, so
+`media_assets` has **no** foreign key),
+`ad_platforms`, `ad_countries`, `landing_pages`(canonical URL only in slice 1 -- **DEFERRED, not built**).
 AI: `ad_analysis`(ad_id, copy_hash, analysis_version, model, provider, prompt_version, result JSONB, tokens,
 cost_estimate, status), `ai_jobs`.
 All tables: `id` (UUID), `created_at`, `updated_at`, and `provider`/`data_origin`/`collection_run_id` where relevant.
@@ -97,8 +103,10 @@ Deferred tables (created later, not now): video_*, scene_*, hooks/offers/ctas ba
   - `creative_hash` v1 (`s2.2-creative-v1`): the ad's **provider media keys**, sorted for
     the hash representation only. This is an *identity*, not a content digest -- `AGENTS.md`
     section 12 forbids media byte downloads in S0-S3, so two ads re-served under a rotated
-    key look different here and a creative duplicate is a hint rather than proof. S2.4's
-    media-byte hash becomes a **v2** of this function and reinterprets nothing.
+    key look different here and a creative duplicate is a hint rather than proof. **S2.4 built no
+    byte hash** -- it stores provider-key *references* only -- so this function is unchanged. A
+    media-byte hash would be a **v2** of it in a later, separately approved checkpoint, and it
+    would reinterpret nothing.
   - Both S2.2 columns live on `ad_snapshots`, are **nullable**, and are never backfilled:
     `NULL` means the observation predates S2.2. The table is append-only, so an older row
     cannot be enriched without rewriting history.
@@ -157,16 +165,29 @@ Deferred tables (created later, not now): video_*, scene_*, hooks/offers/ctas ba
   Evergreen 90+. UI label at **60+ days**: **LONG-RUNNING SIGNAL** with tooltip "duration is a public proxy, not performance".
   Never "winner", "loser", "best", or "top performer": a duration is a public-data proxy, never a performance claim.
 
-## Creative archive
-**Deferred, and not S2.2.** `AGENTS.md` section 12 forbids media byte downloads in S0-S3, so
-none of the following has been built; it is recorded here as the intended later shape, and
-`creative_hash` v1 above is explicitly the *provider-key fallback* rather than a byte digest.
+## Creative references (built in S2.4) and the byte archive (deferred)
+
+**Built -- references only.** S2.4 adds `media_assets` and `ad_snapshot_media`: the provider's key
+for each creative, its reported mime/dimensions/duration, the URL it gave, and the relationship
+from each snapshot that referenced it. Nothing is downloaded, nothing is hashed, no `MediaStore`
+is called, and `storage_key`/`byte_size` are NULL on every row. An asset is **shared identity**,
+so `media_assets` carries no foreign key; the observation relationship is the many-to-many
+`ad_snapshot_media` link. Snapshots written before migration `0008` are **not backfilled** --
+their media stays in `ad_snapshots.normalized`, which remains authoritative for them.
+
+`provider_key` is an **identity hint, not cryptographic proof**. No real provider has been run
+against this product, so key stability is unverified; a rotated key becomes a second row rather
+than a guessed merge. `creative_hash` v1 above is explicitly the *provider-key* digest, not a
+byte digest, and it stays that way.
+
+**Deferred -- the byte archive.** `AGENTS.md` section 12 forbids media byte downloads in S0-S3, so
+none of the following has been built; it is recorded here as the intended later shape.
 Download at collection time (URLs expire), only when the provider returned a media URL. Hash
-bytes; skip if sha256 exists. Images stored as-is plus a WebP thumbnail; video stored as-is in
-slice 1 (no ffmpeg processing yet, only ffprobe for duration if available). Failures are
-recorded per asset, not per run. Media is served through authenticated backend routes, never
-public buckets. When this lands, byte hashing becomes `creative_hash` **v2**; no stored
-`s2.2-creative-v1` value is reinterpreted.
+bytes; skip if a content key already exists. Images stored as-is plus a WebP thumbnail; video
+stored as-is in slice 1 (no ffmpeg processing yet, only ffprobe for duration if available).
+Failures are recorded per asset, not per run. Media is served through authenticated backend
+routes, never public buckets. When this lands, byte hashing becomes `creative_hash` **v2**; no
+stored `s2.2-creative-v1` value is reinterpreted, recomputed or backfilled.
 
 ## AI copy analysis (slice 1)
 - Input: normalized copy fields per ad (all cards' text joined with markers), country, language hint.
