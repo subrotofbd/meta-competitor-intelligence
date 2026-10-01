@@ -66,6 +66,7 @@ S12_REVISION = "0003_jobs_table"
 S21_REVISION = "0004_ad_history"
 S21_FIX_REVISION = "0005_ads_data_origin_check"
 S22_REVISION = "0006_s2_2_hashes"
+S23_REVISION = "0007_status_by_context"
 BASE_REVISION = "0001_pg_trgm"
 
 NOW = datetime(2026, 9, 30, 9, 0, tzinfo=UTC)
@@ -133,20 +134,16 @@ def test_the_migration_applies_and_leaves_one_head() -> None:
     assert len(ScriptDirectory.from_config(_config()).get_heads()) == 1
     with get_engine().connect() as connection:
         applied = connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-    assert applied == S22_REVISION
+    assert applied == S23_REVISION
 
 
-def test_s21_extends_the_s12_revision_rather_than_branching() -> None:
-    """One linear lineage. Two heads means no single `upgrade` reaches the schema.
-
-    Six revisions: `0005` repairs a missing check that `0004_ad_history` failed to
-    install, and `0006` adds S2.2's two digests. Both extend the same chain
-    rather than branching from it, so one `upgrade` still reaches everything.
-    """
+def test_s23_extends_the_s22_revision_rather_than_branching() -> None:
+    """Seven revisions, one chain. Two heads means no single `upgrade` reaches it."""
     script = ScriptDirectory.from_config(_config())
     revisions = {revision.revision: revision.down_revision for revision in script.walk_revisions()}
 
     assert revisions == {
+        S23_REVISION: S22_REVISION,
         S22_REVISION: S21_FIX_REVISION,
         S21_FIX_REVISION: S21_REVISION,
         S21_REVISION: S12_REVISION,
@@ -154,6 +151,117 @@ def test_s21_extends_the_s12_revision_rather_than_branching() -> None:
         S11_REVISION: BASE_REVISION,
         BASE_REVISION: None,
     }
+
+
+def test_the_s23_downgrade_renders_complete_sql_without_executing_it() -> None:
+    """Every S2.3 object dropped, rendered offline.
+
+    The four indexes go before the table they sit on, and the two indexes on
+    *other* tables -- `seen_in_run` and `collection_runs` -- go too, or a
+    downgrade would leave them behind as orphans.
+    """
+    buffer = io.StringIO()
+    with redirect_stdout(buffer):
+        command.downgrade(_config(), f"{S23_REVISION}:{S22_REVISION}", sql=True)
+    sql = buffer.getvalue()
+
+    assert "DROP TABLE ad_status_by_context" in sql
+    assert "DROP INDEX ix_ad_status_by_context_page_country" in sql
+    assert "DROP INDEX ix_ad_status_by_context_last_status_run_id" in sql
+    # The two S2.3 added to pre-existing tables.
+    assert "DROP INDEX ix_seen_in_run_collection_run_id" in sql
+    assert "DROP INDEX ix_collection_runs_page_country_complete" in sql
+
+    assert sql.index("DROP INDEX") < sql.index("DROP TABLE")
+
+
+def test_the_s23_indexes_exist_in_the_database() -> None:
+    """All four, read from `pg_indexes` so the database is agreeing with the models.
+
+    The partial index on `collection_runs` is the one that matters most: it
+    excludes failed and partial runs, which `AGENTS.md` section 8 requires to be
+    invisible to the absence-streak walk.
+    """
+    with get_engine().connect() as connection:
+        installed = {
+            str(row[0])
+            for row in connection.execute(
+                text("SELECT indexname FROM pg_indexes WHERE schemaname = 'public'")
+            )
+        }
+        # `indpred` is the partial-index predicate; `indexprs` holds *expressions*
+        # (an index on an expression) and is NULL for an ordinary one. Reading the
+        # wrong column returns NULL and this test would pass for the wrong reason.
+        predicate = connection.execute(
+            text(
+                "SELECT pg_get_expr(pg_index.indpred, pg_index.indrelid) FROM pg_index "
+                "JOIN pg_class ON pg_class.oid = pg_index.indexrelid "
+                "WHERE pg_class.relname = 'ix_collection_runs_page_country_complete'"
+            )
+        ).scalar_one()
+
+    for name in (
+        "ix_ad_status_by_context_page_country",
+        "ix_ad_status_by_context_last_status_run_id",
+        "ix_seen_in_run_collection_run_id",
+        "ix_collection_runs_page_country_complete",
+    ):
+        assert name in installed, name
+
+    assert predicate is not None, "the complete-run index is not partial"
+    assert "complete" in str(predicate)
+
+
+def test_the_s23_table_exists_with_its_expected_columns() -> None:
+    """Read from `information_schema`, so this is the database's own shape."""
+    expected = {
+        "id",
+        "created_at",
+        "updated_at",
+        "ad_id",
+        "facebook_page_id",
+        "country",
+        "current_status",
+        "provider_active",
+        "not_seen_since_at",
+        "last_status_run_id",
+    }
+
+    with get_engine().connect() as connection:
+        installed = {
+            str(row[0])
+            for row in connection.execute(
+                text(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_name = 'ad_status_by_context'"
+                )
+            )
+        }
+
+    assert installed == expected
+
+
+def test_ads_gained_no_column_in_s23() -> None:
+    """The whole point of the context table.
+
+    `ARCHITECTURE.md` originally put `current_status` on `ads`, which cannot work:
+    an ad is served on several pages, and one row cannot hold two answers to "did
+    we see it?". Asserted against the live database so a later migration cannot
+    quietly add a global status back.
+    """
+    with get_engine().connect() as connection:
+        installed = {
+            str(row[0])
+            for row in connection.execute(
+                text("SELECT column_name FROM information_schema.columns WHERE table_name = 'ads'")
+            )
+        }
+
+    assert "current_status" not in installed
+    assert "provider_active" not in installed
+    assert "not_seen_since_at" not in installed
+    assert "facebook_page_id" not in installed
+    assert "country" not in installed
 
 
 def test_the_ads_data_origin_vocabulary_is_enforced_in_the_database(
@@ -365,7 +473,22 @@ def _ad_id(session: Session, run: CollectionRun, meta_ad_id: str = "ad-0001") ->
     return ad.id
 
 
-def test_the_s22_downgrade_renders_complete_sql_without_executing_it() -> None:
+def test_s21_extends_the_s12_revision_rather_than_branching() -> None:
+    """One linear lineage. Two heads means no single `upgrade` reaches the schema.
+
+    The chain is asserted in full by `test_s23_extends_the_s22_revision_rather_
+    than_branching` above; this keeps the S2.1 link named, because that is the
+    revision that introduced the tables every later one builds on.
+    """
+    script = ScriptDirectory.from_config(_config())
+    revisions = {revision.revision: revision.down_revision for revision in script.walk_revisions()}
+
+    assert revisions[S21_REVISION] == S12_REVISION
+    assert revisions[S22_REVISION] == S21_FIX_REVISION
+    assert revisions[S21_FIX_REVISION] == S21_REVISION
+
+
+def test_the_s22_fix_downgrade_renders_complete_sql_without_executing_it() -> None:
     """Every S2.2 object dropped, in reverse order, rendered offline.
 
     The indexes must go before the columns they are built on, and the checks

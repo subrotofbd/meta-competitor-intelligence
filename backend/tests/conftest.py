@@ -227,6 +227,42 @@ class StubResult:
     def all(self) -> list[object]:
         return [self._row]
 
+    def scalars(self) -> _EmptyResult:
+        """Added for S2.3, whose status evaluator reads rows with `.scalars()`.
+
+        A fake session has no table behind it, so this returns nothing rather than
+        the stand-in: a status query against a recording session should find no
+        status rows, which is the truth for a session that stored none.
+        """
+        return _EmptyResult()
+
+
+class _EmptyResult:
+    """An empty result set, for queries whose rows would not exist anyway."""
+
+    def __iter__(self) -> Iterator[object]:
+        """Empty, because a recording session stored no status rows.
+
+        `list(session.execute(...).scalars())` is the shape S2.3's evaluator uses,
+        so being iterable is what makes a fake session usable with it at all.
+        """
+        return iter(())
+
+    def scalars(self) -> _EmptyResult:
+        return self
+
+    def all(self) -> list[object]:
+        return []
+
+    def first(self) -> None:
+        return None
+
+    def scalar_one(self) -> object:
+        raise AssertionError("a fake session has no rows to return")
+
+    def scalar_one_or_none(self) -> None:
+        return None
+
 
 @pytest.fixture
 def ad_provider(

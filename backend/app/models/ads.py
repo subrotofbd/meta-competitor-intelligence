@@ -349,4 +349,10 @@ class SeenInRun(Base, UuidPrimaryKeyMixin, TimestampMixin):
         nullable=False,
     )
 
-    __table_args__ = (UniqueConstraint("ad_id", "collection_run_id", name="uq_seen_in_run_ad_run"),)
+    __table_args__ = (
+        UniqueConstraint("ad_id", "collection_run_id", name="uq_seen_in_run_ad_run"),
+        # S2.3 added this. Evaluating one Page + country's status after a run has
+        # to ask "which ads did *this run* observe", and the unique constraint
+        # above leads on `ad_id` so it cannot answer that without scanning.
+        Index("ix_seen_in_run_collection_run_id", "collection_run_id"),
+    )

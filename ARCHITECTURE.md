@@ -62,9 +62,11 @@ Identity: `users`(role admin/analyst/viewer), `settings`, `audit_logs`.
 Tracking: `competitors`, `facebook_pages`(page_id, country, tracking_frequency, is_tracked).
 Runs: `collection_runs`(status, started/finished, counts, provider), `provider_runs`(request_meta, http status, error,
 cost_estimate), `raw_responses`(run_id, provider, payload JSONB or object-store ref, payload_hash).
-Ads: `ads`(stable UUID; `meta_ad_id` unique per provider source; first_seen_at, last_seen_at, current_status, latest
-snapshot id), **`ad_snapshots`** (immutable, one row per ad per run seen: run_id, normalized JSONB, copy_hash,
-creative_hash, content_hash, provider status fields, `raw_ref`), `ad_creatives`(cards/formats, card_key),
+Ads: `ads`(stable UUID; `meta_ad_id` unique per provider source; first_seen_at, last_seen_at, latest
+snapshot id -- **no `current_status`: see Historical tracking rules, it lives per Page + country in
+`ad_status_by_context`**), **`ad_snapshots`** (immutable, one row per ad per run seen: run_id, normalized JSONB, copy_hash,
+creative_hash, content_hash, provider status fields, `raw_ref`), `ad_status_by_context`(ad + page + country; `seen` /
+`not_seen_since` / `presumed_inactive`, provider_active, not_seen_since_at), `ad_creatives`(cards/formats, card_key -- **DEFERRED, not built**),
 `media_assets`(sha256 unique, mime, bytes, width/height, storage_key, source_url, downloaded_at),
 `ad_platforms`, `ad_countries`, `landing_pages`(canonical URL only in slice 1).
 AI: `ad_analysis`(ad_id, copy_hash, analysis_version, model, provider, prompt_version, result JSONB, tokens,
@@ -118,15 +120,42 @@ Deferred tables (created later, not now): video_*, scene_*, hooks/offers/ctas ba
 - **`ad_platforms`, `ad_countries` and `landing_pages` are not S2.2 scope.** They appear in
   the slice-1 list above for completeness and remain unbuilt. S2.2 added two columns and
   two indexes and no tables at all.
+- **Status is per Page + country, in `ad_status_by_context`.** It is **not** a column on `ads`,
+  and the earlier `ads(... current_status ...)` above is superseded. An ad is served on several
+  pages, `ads` deliberately carries no page or country foreign key, and status is a fact *about a
+  context* -- an ad can be present on page A and absent from page B, and both are true at once.
+  One row on `ads` cannot hold two answers to "did we see it?", so the context is pinned down in
+  `ad_status_by_context`, keyed on `UNIQUE (ad_id, facebook_page_id, country)`.
+  - `current_status` -- our derived conclusion. A frozen vocabulary: **`seen`**, **`not_seen_since`**,
+    **`presumed_inactive`**. `seen` is a statement about an observation, not a verdict.
+  - `provider_active` -- the provider's own assertion, normalised from a frozen token table
+    (`active` -> true, `inactive` -> false, everything else -> NULL). **Tri-state, and NULL is
+    never rounded to false**: silence is not a claim. The raw wording stays untranslated on
+    `ad_snapshots.ad_status`. The two are separate fields and are never merged.
+  - `not_seen_since_at` -- our server-side boundary: the `finished_at` of the last COMPLETE run
+    that actually observed this ad **in this context**. Never `meta_delivery_start`.
+  - `last_status_run_id` -- the idempotence guard. An evaluation older than the recorded run is
+    discarded, so a replayed or retried job cannot rewind a conclusion.
+  - `ad_status_by_context` is a **derived projection and is fully recomputable** from
+    `raw_responses -> ad_snapshots -> seen_in_run -> collection_runs`. It is the only table status
+    evaluation writes; `ad_snapshots` stays append-only and `ads` is untouched.
 - Status semantics, kept explicit:
   - `provider_active` = provider says the ad is running (only trusted when returned).
   - `not_seen_since` = we did not see it in the latest complete run for that Page/country. **This is not "stopped".**
-    An ad is marked `presumed_inactive` only after N consecutive complete runs without it (default 2), and never after
-    a failed or partial run.
+    An ad is marked `presumed_inactive` only after N consecutive complete runs without it (**N = 2, fixed, not configurable**), and never after
+    a failed or partial run. A FAILED or PARTIAL run is **invisible** to the streak -- it can
+    neither advance nor reset it -- so a provider outage can never mark an ad inactive. A COMPLETE
+    run serving zero ads **does** count as evidence of absence for its context. Streaks never
+    cross a Page or country boundary.
+  - Reappearance is a normal transition back to `seen`: absence is a *presumption*, not a verdict,
+    and an ad can be delisted and relisted.
+  - A status change **never creates an `ad_snapshot`** -- `ad_status` is excluded from
+    `content_hash`, so a status flip cannot move the digest or `latest_snapshot_id`.
 - Two duration figures, never merged: `meta_delivery_start` (provider-reported) and `first_seen_at` (our own first
   observation). Duration bucket uses the provider start date when present, else first_seen_at, and says which.
-- Buckets (configurable defaults, my assumption): New 0-6 d, Testing 7-29, Established 30-59, Long-running 60-89,
-  Evergreen 90+. UI label: **LONG-RUNNING SIGNAL** with tooltip "duration is a public proxy, not performance".
+- Buckets (boundaries approved, not assumed): New 0-6 d, Testing 7-29, Established 30-59, Long-running 60-89,
+  Evergreen 90+. UI label at **60+ days**: **LONG-RUNNING SIGNAL** with tooltip "duration is a public proxy, not performance".
+  Never "winner", "loser", "best", or "top performer": a duration is a public-data proxy, never a performance claim.
 
 ## Creative archive
 **Deferred, and not S2.2.** `AGENTS.md` section 12 forbids media byte downloads in S0-S3, so

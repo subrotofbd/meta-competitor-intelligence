@@ -1484,3 +1484,195 @@ not justified by any failing test.
 machine, which counts N **consecutive complete** runs and must never fire after a failed or
 partial one. Nothing in S2.3 is started. `S2.4` (media bytes, `media_assets`) is likewise not
 started. Do not begin either without explicit human approval.
+
+---
+
+## 2026-10-01, Checkpoint S2.3 -- Ad Status State Machine (COMPLETE)
+
+**S2.3 is complete and READY FOR REVIEW. S2.4 has NOT started.** Nothing in this entry covers
+media bytes, S3, or the frontend.
+
+### 1. The decision that shaped the checkpoint
+
+`ARCHITECTURE.md` specified `ads.current_status`. **That is not buildable**, and the reason is
+structural rather than a matter of taste.
+
+An ad is served on several pages. `ads` deliberately carries **no page and no country foreign
+key** -- S2.1 made that call and `test_ads.py` enforces it. But status is a fact *about a
+context*: an ad can be present on page A and absent from page B, and both are true at once. One
+row on `ads` cannot hold two answers to "did we see it?", and adding a page foreign key to `ads`
+would undo the S2.1 decision.
+
+So status lives in **`ad_status_by_context`**, keyed on
+`UNIQUE (ad_id, facebook_page_id, country)`. `ads` gained **nothing** -- asserted in both
+`test_status_evaluator.py` and `test_schema_integration.py`, against the live database.
+
+### 2. Files created (5)
+
+- `backend/app/models/ad_status.py` -- `AdStatusByContext`, the frozen status vocabulary.
+- `backend/app/services/status_evaluator.py` -- the streak walk, the provider token table,
+  `record_observation`, `evaluate_run_status`.
+- `backend/app/services/ad_duration.py` -- bucket boundaries and the long-running signal. Pure
+  functions taking `now` explicitly, so a report is reproducible and the boundaries are testable.
+- `backend/tests/test_status_rules.py` -- 56 unit tests (provider tokens, buckets, the signal).
+- `backend/tests/test_status_evaluator.py` -- 26 integration tests (every transition and edge).
+- `database/migrations/versions/0007_status_by_context.py`.
+
+### 3. Files modified (11)
+
+`models/__init__.py` (charter + registration), `models/ads.py` (one index), `models/runs.py`
+(one partial index), `services/ad_persistence.py` (writes the `seen` status per sighting),
+`services/collection.py` (evaluates after the run status is known), `conftest.py` (fake result
+grew `scalars()`), and tests `test_ad_persistence.py`, `test_ads.py`, `test_models.py`,
+`test_migrations.py`, `test_schema_integration.py`, `test_duplicate_detection.py`,
+`test_collection_ordering.py`, `test_collection_hardening.py`.
+
+### 4. Schema and migration
+
+`0007_status_by_context`, extending `0006_s2_2_hashes`. Single linear head, no drift.
+`ad_status_by_context`: `id`, `created_at`, `updated_at`, `ad_id`, `facebook_page_id`, `country`,
+`current_status`, `provider_active`, `not_seen_since_at`, `last_status_run_id`.
+
+- `current_status VARCHAR(32) NOT NULL`, CHECK frozen to `seen | not_seen_since | presumed_inactive`.
+- `provider_active BOOLEAN NULL` -- tri-state. `False` only from a recognised "inactive".
+- `not_seen_since_at TIMESTAMPTZ NULL` -- the last COMPLETE run's `finished_at` that actually
+  observed this ad in this context. CHECKed against `now()`.
+- Three FKs, all **RESTRICT**. All three parents nullable as documented.
+- **Four indexes, each for a named query**: `collection_runs (facebook_page_id, country,
+  finished_at DESC) WHERE status = 'complete'`; `seen_in_run (collection_run_id)`;
+  `ad_status_by_context (facebook_page_id, country)`; `ad_status_by_context (last_status_run_id)`.
+
+**Nothing was backfilled and no row was written by the migration.** The new indexes on
+`collection_runs` and `seen_in_run` close the deferral `PROJECT_MEMORY.md:553` recorded ("S2
+writes the query and measures before an index is built for it") -- this is that S2, and the two
+S1.1 tests that pinned its absence were updated to record the decision rather than removed.
+The complete-run index is **partial** because failed and partial runs are invisible to the walk.
+
+### 5. Transition matrix
+
+| From | Event | To | `not_seen_since_at` | `provider_active` |
+|---|---|---|---|---|
+| -- | first qualifying COMPLETE observation | `seen` | NULL | mapped, else NULL |
+| `seen` | present in a later COMPLETE run | `seen` | NULL | this run's, else NULL |
+| `seen` | absent, streak 1 | `not_seen_since` | last observing run's `finished_at` | **NULL** |
+| `not_seen_since` | present again | `seen` | NULL | refreshed |
+| `not_seen_since` | absent, streak 2 | `presumed_inactive` | unchanged | **NULL** |
+| `presumed_inactive` | present again | `seen` | NULL | refreshed |
+| any | FAILED or PARTIAL run | **unchanged** | unchanged | unchanged |
+
+### 6. The N=2 rule
+
+Only COMPLETE runs count. A FAILED or PARTIAL run is **invisible** to the walk -- filtered out by
+`WHERE status = 'complete'` *and* refused by an early return -- so it can neither advance nor
+reset a streak. Two complete absences either side of an outage are still consecutive complete
+absences; the alternative would let a provider being down keep every ad alive for ever.
+
+A COMPLETE run serving **zero ads counts** as evidence of absence for its context: an empty but
+clean walk is a complete observation of nothing.
+
+Streaks never cross a Page or country boundary. "Consecutive" means consecutive among complete
+runs **for the same context**, ordered by `finished_at DESC`, stopping at the most recent run that
+observed the ad. N is a module constant, not a `Settings` field.
+
+### 7. Provider evidence and derived status never merge
+
+`provider_active` is the provider's assertion, read from a **frozen token table** matched
+case-insensitively after stripping: `active` -> True, `inactive` -> False, **everything else ->
+None**. No fuzzy or substring matching, so `inactive_pending_review` is not read as inactive.
+
+**An absent run clears `provider_active` to None.** Carrying a previous `True` forward would
+assert provider evidence that no longer exists. Two facts, two columns; neither overwrites the
+other.
+
+### 8. S2.1 and S2.2 invariants preserved
+
+- `content_hash` v1 (`s2.1-content-v1`) untouched. `copy_hash` / `creative_hash` untouched.
+- **Status changes create no `ad_snapshots` rows.** `ad_status` is excluded from `content_hash`,
+  so a status flip cannot move the digest or `latest_snapshot_id`. Asserted in
+  `test_status_evaluation_creates_no_snapshots`.
+- The append-only trigger is still armed, asserted by writing to a real snapshot row.
+- Raw-before-normalize ordering and the S2.1 transaction boundary untouched: raw responses are
+  still committed page by page, and `_persist_ad_history` still rolls back only the normalised
+  layer.
+
+### 9. Validation
+
+| Check | Result |
+|---|---|
+| Targeted S2.3 tests | **339 passed** |
+| Full backend suite | **896 passed** |
+| `ruff check backend` | All checks passed |
+| `ruff format --check backend` | 75 files already formatted |
+| `mypy` (project config) | Success, 42 source files |
+| `mypy backend` | **61 pre-existing errors in 15 files, zero in any S2.3 file** |
+| `alembic current` / `heads` | `0007_status_by_context`, single head |
+| `alembic check` | No new upgrade operations detected |
+
+**Mutation-verified -- and two of the five initially did NOT fail, which is the useful part.**
+
+1. Removing the `WHERE status = 'complete'` filter: **no failure**. The early return in
+   `evaluate_run_status` is the primary guard and the SQL filter is a second line of defence.
+   Disabling the *early return* then **failed** `test_a_non_complete_run_changes_nothing_at_all`.
+2. **N=2 -> N=1: failed 5 tests.**
+3. **Carrying stale `provider_active`: failed** `test_an_absent_run_clears_a_stale_provider_active_to_null`.
+4. Disabling the idempotence guard: **failed** `test_a_replayed_older_run_cannot_rewind_a_newer_conclusion`.
+5. Crossing Page/country boundaries in the streak walk: **no failure at first**. The two existing
+   context tests shared an observation at the same depth in both walks, so they reached the same
+   conclusion either way -- a genuine hole. `test_another_pages_sighting_does_not_end_this_pages
+   _absence_streak` was added with interleaved pages so leaking a context changes the answer, and
+   it now **fails** under that mutation.
+
+Every mutation was reverted and the file verified byte-intact.
+
+### 10. Known limitations
+
+- **A status row exists only for a context where the ad has been observed.** An ad never seen in
+  a context has no row, so there is nothing to mark absent. That is the honest reading -- absence
+  of observation is not an observation of absence -- but it means a newly monitored page has no
+  status history until its first sighting.
+- **The absence walk looks back at most 10 complete runs.** Beyond that it stops counting, so an
+  ad absent for longer than 10 runs is judged on those 10 rather than the whole history. The
+  conclusion is the same (>= 2), but the boundary is not exact for very long absences.
+- **`not_seen_since_at` is NULL until the ad has been observed in a complete run**, and renders as
+  `—` per `AGENTS.md` section 7.
+- **`provider_active` reflects only recognised tokens.** Real provider vocabularies beyond
+  `active` / `inactive` are unverified; the committed corpus contains only `"active"`. Unknown
+  wording is NULL rather than false, and the raw string is preserved on `ad_snapshots.ad_status`.
+- **`mypy backend` has 61 pre-existing errors** in S0.3/S1.x test files. Recorded baseline, not a
+  regression; S2.3 contributes zero. The project gate is the `mypy` project config, which is clean.
+- **Windows `TEMP`/`TMP`: 11 pre-existing `PermissionError` errors** in
+  `test_media_store.py` / `test_offline_guard.py` under the default temp path. Environmental, in
+  S0.3 tests that must not be modified to hide it. Set `TEMP`/`TMP` to
+  `C:\Users\DELL\AppData\Local\Temp\opencode` before counting the suite on this machine.
+- **Integration tests require the PostgreSQL container** and are not skipped when it is down.
+- **No real provider exists.** Everything has run against `MockProvider`. No API, no auth, no
+  frontend, no reporting.
+
+### 11. S2.4 -- NOT STARTED
+
+No `media_assets`, no media byte downloads, no byte hashing. `AGENTS.md` section 12 forbids byte
+downloads in S0-S3, so `creative_hash` v1 remains a **provider-key identity**: two ads re-served
+under a rotated key look different to it, and a creative duplicate is a hint rather than proof.
+When S2.4 lands, byte hashing becomes `creative_hash` **v2** and reinterprets no stored
+`s2.2-creative-v1` value. Do not begin without explicit human approval.
+
+### 12. Future S3 AI Campaign Advisor and reporting -- RECORDED, NOT IMPLEMENTED
+
+Recorded here because the product direction is settled even though the work is not S2.3's.
+
+**The product is commercial competitor intelligence.** Political and social-issue advertising are
+explicitly not the product focus.
+
+A future S3 AI Campaign Advisor would need to: ask the client questions *before* recommending;
+take campaign objective, target customer, offer, geography, desired format, brand style and CTA
+as inputs; recommend ad concepts, banner concepts, and short-video / Reel concepts; and explain
+**why** each recommendation was produced, from observed patterns in the collected data.
+
+Constraints that travel with it: AI output stays explicitly labelled as **AI interpretation /
+recommendation**; competitor spend, leads, sales, conversions and ROAS are **never fabricated**
+(`AGENTS.md` section 5); any performance metric must carry legitimate provenance or be explicitly
+unavailable.
+
+Future reporting must support **downloadable competitor-intelligence reports**, and must
+distinguish observed, calculated, provider-reported, client-provided and unavailable metrics.
+**CSV export is future S3 scope.** None of this is implemented in S2.3.

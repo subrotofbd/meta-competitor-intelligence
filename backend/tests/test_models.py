@@ -15,7 +15,7 @@ from typing import Any
 
 import pytest
 import sqlalchemy as sa
-from sqlalchemy import CheckConstraint, Table
+from sqlalchemy import CheckConstraint, Column, Table
 
 # Importing the package is what populates `Base.metadata`.
 from app.db.base import Base
@@ -57,8 +57,13 @@ S21_TABLES = frozenset({"ads", "ad_snapshots", "seen_in_run"})
 #: alongside `ad_creatives`. A non-empty set here means scope nobody approved.
 S22_TABLES: frozenset[str] = frozenset()
 
-#: The cumulative S2 scope, which is everything that exists after S2.2.
-S2_TABLES = S1_TABLES | S21_TABLES | S22_TABLES
+#: S2.3 adds exactly one table: `ad_status_by_context`. **Not a column on `ads`** --
+#: an ad is not owned by a page, so status cannot be a property of the ad. Pinned
+#: as a literal so a fourth table appearing here is scope nobody approved.
+S23_TABLES: frozenset[str] = frozenset({"ad_status_by_context"})
+
+#: The cumulative S2 scope, which is everything that exists after S2.3.
+S2_TABLES = S1_TABLES | S21_TABLES | S22_TABLES | S23_TABLES
 
 S11_MODELS = (Competitor, FacebookPage, CollectionRun, ProviderRun, RawResponse)
 
@@ -67,11 +72,31 @@ EXPECTED_INDEXES = {
     "ix_facebook_pages_competitor_id": "GET /competitors/{id}/pages",
     "ix_collection_runs_facebook_page_id": "latest run for a page and country",
     "ix_provider_runs_collection_run_id": "the calls belonging to a run",
+    # Added in S2.3, when the query this deferred index was waiting for was
+    # written: the absence-streak walk for `not_seen_since` /
+    # `presumed_inactive`, which needs country and a time ordering the index above
+    # does not have. Partial on `status = 'complete'` because failed and partial
+    # runs are invisible to that walk.
+    "ix_collection_runs_page_country_complete": "consecutive complete runs per page+country",
 }
 
 
 def _tables() -> list[Table]:
     return [Base.metadata.tables[name] for name in sorted(S11_TABLES)]
+
+
+def _indexed_column_name(expression: object) -> str:
+    """The column name an index expression covers.
+
+    `index.columns` only sees real `Column` objects. An index declared with
+    `sa.text("finished_at DESC")` -- which an index inside `__table_args__` has
+    to use, because there is no table in scope to take a `Column` from -- appears
+    as a `TextClause` whose text is the name plus its direction.
+    """
+    if isinstance(expression, Column):
+        return str(expression.name)
+    text_value = str(expression)
+    return text_value.split()[0] if text_value.split() else text_value
 
 
 def _columns(table: Table) -> set[str]:
@@ -419,19 +444,35 @@ def test_the_only_index_on_a_foreign_key_is_for_a_named_access_pattern() -> None
 
 
 def test_no_index_exists_only_in_speculation() -> None:
-    """Nothing indexes a column the S1.1 queries do not filter on.
+    """Nothing indexes a column no query filters on.
 
-    The queries S2 will need are known -- latest complete run per page and
-    country, a page's call history -- and the first one would tempt a composite
-    `(page, country, started_at)` index. It is deliberately absent: S2 should
-    write the query and measure it before an index is built for it. This test
-    fails if one is added, so the decision stays visible instead of becoming
-    silent.
+    This test originally failed on a composite `(page, country, started_at)`
+    index, because the query that needed it had not been written yet: S2 was to
+    write the query and measure it first. **S2.3 wrote that query** --
+    `status_evaluator` walks the consecutive COMPLETE runs for one Page + country
+    -- and the composite now exists, partial on `status = 'complete'`.
+
+    So the set grew, and the discipline did not: it is still an exact set, so the
+    next speculative index fails here rather than becoming silent.
     """
     indexed_columns = {
-        column.name for table in _tables() for index in table.indexes for column in index.columns
+        _indexed_column_name(expression)
+        for table in _tables()
+        for index in table.indexes
+        for expression in index.expressions
     }
-    assert indexed_columns == {"competitor_id", "facebook_page_id", "collection_run_id"}
+    assert indexed_columns == {
+        "competitor_id",
+        "facebook_page_id",
+        "collection_run_id",
+        # Added with the S2.3 absence-streak index. The fourth column is declared
+        # with `sa.text("finished_at DESC")` because an index inside
+        # `__table_args__` has no table to take a `Column` from, and PostgreSQL
+        # walking a btree backwards serves the same query. `index.columns` does
+        # not see a text expression, so the names are read from `expressions`.
+        "country",
+        "finished_at",
+    }
 
 
 # ============================================================

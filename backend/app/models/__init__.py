@@ -6,7 +6,8 @@ Tables arrive per checkpoint:
   S2.1  ads, ad_snapshots, seen_in_run
   S2.2  no new tables. Two nullable columns on ad_snapshots -- `copy_hash` and
         `creative_hash` -- plus duplicate detection grouping over them
-  S2.3  ads.current_status (the derived status state machine)
+  S2.3  ad_status_by_context -- status per ad *per Page + country*, because
+        `ads` cannot hold it (see the module docstring). No column on `ads`
   S3.1  ad_analysis, ai_jobs
 
 **SUPERSEDED -- an earlier charter listed five S2.2 tables: `ad_creatives`,
@@ -56,6 +57,7 @@ Importing this package registers every table on `Base.metadata`, which is what
 `database/migrations/env.py` relies on for autogenerate.
 """
 
+from app.models.ad_status import AdStatusByContext
 from app.models.ads import Ad, AdSnapshot, SeenInRun
 from app.models.jobs import Job
 from app.models.mixins import CountryCodeMixin, TimestampMixin, UuidPrimaryKeyMixin
@@ -71,6 +73,7 @@ from app.models.tracking import Competitor, FacebookPage
 __all__ = [
     "Ad",
     "AdSnapshot",
+    "AdStatusByContext",
     "CollectionRun",
     "CollectionRunStatus",
     "Competitor",

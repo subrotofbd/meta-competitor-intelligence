@@ -1092,6 +1092,9 @@ class _FakeRun:
         object.__setattr__(self, "_session", session)
         object.__setattr__(self, "id", session.run_id)
         object.__setattr__(self, "country", "IN")
+        # S2.3: read before the orchestrator's first commit, like `country`, and
+        # handed to the status projection as half of its context.
+        object.__setattr__(self, "facebook_page_id", uuid.uuid4())
         # Read before the orchestrator's first commit and handed to S2.1, whose
         # ad identity is keyed on the provider that issued the ids.
         object.__setattr__(self, "provider", "scripted")

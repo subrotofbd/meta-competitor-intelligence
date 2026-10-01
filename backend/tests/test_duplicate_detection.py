@@ -148,6 +148,10 @@ def _observe(
         observations=[ObservedRecord(record=record, raw_response_id=response.id)],
         provider=PROVIDER,
         data_origin=DataOrigin.third_party,
+        # S2.3 added these: they identify the Page + country the sighting happened
+        # in, which is also the context its status row is keyed on.
+        page_id=run.facebook_page_id,
+        country=run.country,
     )
     session.commit()
     return results[0].ad_id, results[0].snapshot_id

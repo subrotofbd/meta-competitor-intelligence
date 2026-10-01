@@ -109,6 +109,164 @@ def test_s22_added_no_tables() -> None:
     assert {name for name in Base.metadata.tables if name in S22_TABLES} == S22_TABLES
 
 
+def test_s23_added_exactly_the_status_context_table() -> None:
+    """S2.3's boundary is one table, and it is the context table.
+
+    Not `ads.current_status`, which `ARCHITECTURE.md` originally specified: an ad
+    is served on several pages, so status cannot be a property of the ad. The
+    absence of those columns on `ads` is asserted separately, below.
+    """
+    from tests.test_models import S23_TABLES
+
+    s23_actual = {name for name in Base.metadata.tables if name in S23_TABLES}
+
+    assert s23_actual == S23_TABLES
+
+
+def test_the_status_context_table_is_keyed_by_ad_page_and_country() -> None:
+    """One status per observation context, and no more.
+
+    The unique constraint is what makes "which context is this about?" a question
+    with one answer rather than two contradictory rows.
+    """
+    from app.models.ad_status import AdStatusByContext
+
+    assert _columns(AdStatusByContext) == {
+        "id",
+        "created_at",
+        "updated_at",
+        "ad_id",
+        "facebook_page_id",
+        "country",
+        "current_status",
+        "provider_active",
+        "not_seen_since_at",
+        "last_status_run_id",
+    }
+    assert _unique_column_sets(AdStatusByContext) == {
+        frozenset({"ad_id", "facebook_page_id", "country"})
+    }
+
+
+def test_the_status_vocabulary_is_frozen_in_the_database() -> None:
+    """`seen` / `not_seen_since` / `presumed_inactive`, checked by the schema.
+
+    An unrecognised status reaching a report is the worst place to discover one,
+    so the constraint lives in the database rather than only in Python.
+
+    `seen` is in the set and is not a verdict: it says the latest complete run for
+    this context observed the ad, and nothing about how well it performed.
+    """
+    from app.models.ad_status import AD_STATUS_VALUES, AdStatusByContext
+
+    checks = {
+        str(constraint.name): str(constraint.sqltext)
+        for constraint in _table(AdStatusByContext).constraints
+        if isinstance(constraint, CheckConstraint)
+    }
+
+    assert "ck_ad_status_by_context_current_status_vocabulary" in checks
+    for value in AD_STATUS_VALUES:
+        assert value in checks["ck_ad_status_by_context_current_status_vocabulary"]
+    assert set(AD_STATUS_VALUES) == {"seen", "not_seen_since", "presumed_inactive"}
+
+
+def test_provider_active_is_nullable_and_current_status_is_not() -> None:
+    """Tri-state evidence versus a required conclusion.
+
+    `provider_active` is NULL when the provider said nothing recognisable, said
+    nothing at all, or we did not observe the ad in this context's latest complete
+    run -- and NULL is never rounded to False. `current_status` is NOT NULL
+    because a row exists only where we have concluded something.
+    """
+    from app.models.ad_status import AdStatusByContext
+
+    table = _table(AdStatusByContext)
+
+    assert table.c.provider_active.nullable is True
+    assert table.c.current_status.nullable is False
+    assert table.c.not_seen_since_at.nullable is True
+    assert table.c.last_status_run_id.nullable is True
+
+
+def test_every_status_foreign_key_is_required_and_restrict() -> None:
+    """Three parents, all RESTRICT.
+
+    A status row is history: a cascade would let one deleted page take every
+    observed status with it, which is the same rule every other table in this
+    schema obeys.
+    """
+    from app.models.ad_status import AdStatusByContext
+
+    table = _table(AdStatusByContext)
+    expected = {
+        "ad_id": "ads.id",
+        "facebook_page_id": "facebook_pages.id",
+        "last_status_run_id": "collection_runs.id",
+    }
+
+    for column, target in expected.items():
+        declared = table.c[column]
+        assert declared.foreign_keys, column
+        constraint = next(iter(declared.foreign_keys))
+        assert constraint.target_fullname == target
+        assert constraint.ondelete == "RESTRICT", column
+
+    # `provider_active` and `not_seen_since_at` are not identities, so they carry
+    # no foreign key and no nullability of their own beyond the boolean/timestamp.
+    for column in ("provider_active", "not_seen_since_at", "current_status"):
+        assert not table.c[column].foreign_keys, column
+
+
+def test_the_status_indexes_are_declared_with_their_access_patterns() -> None:
+    """Two on the context table, each for a named query.
+
+    The absence streak walk runs over `collection_runs` and is covered by an index
+    there; these two are what make one context's evaluation cheap.
+    """
+    from app.models.ad_status import AdStatusByContext
+
+    assert {index.name for index in _table(AdStatusByContext).indexes} == {
+        "ix_ad_status_by_context_page_country",
+        "ix_ad_status_by_context_last_status_run_id",
+    }
+
+
+def test_the_complete_run_index_is_partial_on_complete() -> None:
+    """`AGENTS.md` section 8: a FAILED or PARTIAL run can neither advance nor reset
+    an absence streak.
+
+    Those runs are *invisible* to the walk, so indexing them would index rows the
+    query must never read -- and a provider outage, which is exactly when the index
+    matters, would fill it.
+    """
+    assert "ix_collection_runs_page_country_complete" in {
+        index.name for index in Base.metadata.tables["collection_runs"].indexes
+    }
+    complete_index = next(
+        index
+        for index in Base.metadata.tables["collection_runs"].indexes
+        if index.name == "ix_collection_runs_page_country_complete"
+    )
+    where = complete_index.dialect_options["postgresql"].get("where")
+    assert where is not None, "the index must be partial on status = 'complete'"
+    assert "complete" in str(where)
+
+
+def test_the_status_search_index_guard_still_holds() -> None:
+    """No text search index appeared alongside the status table.
+
+    The context table holds no free text to search -- `current_status` is a frozen
+    three-value vocabulary -- so this is the same guard as S2.1's, re-run because
+    a checkpoint that adds a table is exactly when it could quietly stop
+    applying.
+    """
+    from app.models.ad_status import AdStatusByContext
+
+    for index in _table(AdStatusByContext).indexes:
+        assert index.dialect_options["postgresql"].get("using") != "gin", index.name
+
+
 def test_every_s21_model_is_mapped_to_its_own_table() -> None:
     """A class with no `__tablename__` in the metadata is not a table at all.
 

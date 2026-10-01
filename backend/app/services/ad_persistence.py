@@ -62,6 +62,7 @@ from app.providers.data.provenance import DataOrigin
 from app.services.content_hash import content_hash_v1
 from app.services.copy_hash import copy_hash_v1
 from app.services.creative_hash import creative_hash_v1
+from app.services.status_evaluator import provider_active_from, record_observation
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,6 +106,8 @@ def persist_observations(
     observations: Sequence[ObservedRecord],
     provider: str,
     data_origin: DataOrigin,
+    page_id: uuid.UUID,
+    country: str,
 ) -> tuple[PersistedObservation, ...]:
     """Write one run's worth of ad history.
 
@@ -140,8 +143,10 @@ def persist_observations(
     because the *reader* changed is the case the constraint turns away, and it
     is turned away loudly rather than silently recorded.
 
-    Nothing here decides whether an ad is active, or whether its absence means
-    anything; that is S2.3.
+    Nothing here decides whether an ad's *content* is active, or whether its
+    absence means anything. S2.3's `status_evaluator` draws that conclusion from
+    `seen_in_run` and the run history; this module only records the sighting that
+    the conclusion is built from, and writes the `seen` status it implies.
 
     Args:
         session: The run's session. The caller commits.
@@ -150,6 +155,8 @@ def persist_observations(
             came from. May contain the same ad more than once.
         provider: The provider that issued the ids. Part of ad identity.
         data_origin: How the values were obtained (`AGENTS.md` section 7).
+        page_id: The Page this run is collecting. Part of the S2.3 status context.
+        country: The country this run is collecting. Part of the same context.
 
     Returns:
         One result per distinct ad, in first-appearance order.
@@ -169,6 +176,8 @@ def persist_observations(
                 run_id=run_id,
                 provider=provider,
                 data_origin=data_origin,
+                page_id=page_id,
+                country=country,
             )
         )
     return tuple(results)
@@ -238,6 +247,8 @@ def _persist_one(
     run_id: uuid.UUID,
     provider: str,
     data_origin: DataOrigin,
+    page_id: uuid.UUID,
+    country: str,
 ) -> PersistedObservation:
     record = observed.record
     ad = _resolve_ad(
@@ -279,6 +290,24 @@ def _persist_one(
         ad.latest_snapshot_id = snapshot.id
 
     _link(session, ad_id=ad.id, run_id=run_id, snapshot_id=snapshot_id)
+
+    # S2.3: a sighting is the observation, so it establishes or restores the
+    # status for this Page + country context. Upserted, and deliberately *not*
+    # conditional on `created_snapshot` -- an unchanged ad seen again is still
+    # evidence it is running, and that is what lets a recovered ad stop looking
+    # inactive one cycle later.
+    #
+    # This writes only `ad_status_by_context`. No snapshot is created and
+    # `content_hash` is not consulted: a status change is not a content change
+    # (AGENTS.md section 8).
+    record_observation(
+        session,
+        ad_id=ad.id,
+        page_id=page_id,
+        country=country,
+        provider_active=provider_active_from(record.ad_status),
+        last_status_run_id=run_id,
+    )
 
     return PersistedObservation(
         ad_id=ad.id,

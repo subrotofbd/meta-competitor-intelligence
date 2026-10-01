@@ -58,6 +58,7 @@ from app.providers.data.normalize import NormalizationError, normalize_payload
 from app.providers.data.provenance import DataOrigin
 from app.services.ad_persistence import ObservedRecord, persist_observations
 from app.services.jobs import JobQueue, JobRequest
+from app.services.status_evaluator import evaluate_run_status
 
 #: The job kind for a single page/country collection run.
 COLLECTION_JOB_KIND = "collection.run"
@@ -348,6 +349,10 @@ class CollectionOrchestrator:
         collection_run_id = run.id
         provider_name = run.provider
         data_origin = run.data_origin
+        # S2.3 status is per Page + country, so both must be read out before the
+        # commit below -- and taken from the same values the run itself is scoped
+        # by, so a status row can never describe a context the run was not for.
+        page_id = run.facebook_page_id
 
         run.status = CollectionRunStatus.RUNNING
         run.started_at = datetime.now(UTC)
@@ -467,6 +472,8 @@ class CollectionOrchestrator:
                 observed=observed,
                 provider=provider_name,
                 data_origin=data_origin,
+                page_id=page_id,
+                country=country,
             )
 
             # The run's status now reports how well the payloads read, which is
@@ -480,6 +487,16 @@ class CollectionOrchestrator:
                 run.error_message = _excerpt(stopped.detail)
             elif errors:
                 run.error_message = _describe(errors)
+
+            # S2.3: fold the finished run into the status of its Page + country
+            # context. Runs *after* this line are inside the same transaction as
+            # the `finally` commit, so a failure here rolls the status projection
+            # back with the rest -- while the raw responses, committed page by
+            # page above, stay durable and the whole thing is recomputable.
+            #
+            # `evaluate_run_status` is a no-op for anything but COMPLETE, so a
+            # failed or partial run cannot advance an absence streak.
+            evaluate_run_status(self._session, collection_run_id)
 
         except (Blocked, RateLimited, SchemaChanged, Transient) as e:
             self._handle_provider_error(run, e)
@@ -716,6 +733,8 @@ class CollectionOrchestrator:
         observed: Sequence[ObservedRecord],
         provider: str,
         data_origin: DataOrigin,
+        page_id: uuid.UUID,
+        country: str,
     ) -> None:
         """Write the run's ads, snapshots and observation links.
 
@@ -736,6 +755,8 @@ class CollectionOrchestrator:
                 observations=observed,
                 provider=provider,
                 data_origin=data_origin,
+                page_id=page_id,
+                country=country,
             )
             self._session.commit()
         except Exception:

@@ -197,6 +197,11 @@ def _persist(
         observations=observations,
         provider=provider,
         data_origin=data_origin,
+        # S2.3 added these. Taken from the run itself so a status row can never
+        # describe a context the run was not for -- the same values the
+        # orchestrator reads out before its first commit.
+        page_id=run.facebook_page_id,
+        country=run.country,
     )
     session.commit()
     return results

@@ -40,7 +40,7 @@ from enum import Enum, StrEnum
 from typing import Any
 
 import sqlalchemy as sa
-from sqlalchemy import CheckConstraint, ForeignKey, Index, Numeric, Text
+from sqlalchemy import CheckConstraint, ForeignKey, Index, Numeric, Text, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -198,6 +198,21 @@ class CollectionRun(Base, UuidPrimaryKeyMixin, TimestampMixin, CountryCodeMixin)
         # measure, and adding the index before the query exists is how index
         # overengineering starts.
         Index("ix_collection_runs_facebook_page_id", "facebook_page_id"),
+        # S2.3 wrote that query. `not_seen_since` and `presumed_inactive` walk the
+        # consecutive COMPLETE runs for one Page + country, newest first, and the
+        # index above cannot answer it: no country, no ordering.
+        #
+        # Partial on `status = 'complete'` because a FAILED or PARTIAL run is
+        # *invisible* to that walk -- `AGENTS.md` section 8 forbids letting one
+        # advance or reset an absence streak -- so indexing them would index rows
+        # the query must never read, and a provider outage would fill the index.
+        Index(
+            "ix_collection_runs_page_country_complete",
+            "facebook_page_id",
+            "country",
+            text("finished_at DESC"),
+            postgresql_where=text("status = 'complete'"),
+        ),
         CheckConstraint(ISO_ALPHA_2_CHECK, name="country_iso_alpha2"),
         not_blank("provider"),
         CheckConstraint("records_returned >= 0", name="records_returned_not_negative"),

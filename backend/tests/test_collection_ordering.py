@@ -156,6 +156,10 @@ def _fake_run() -> Any:
     return SimpleNamespace(
         id=uuid.uuid4(),
         country=COUNTRY,
+        # S2.3: status is per Page + country, so the orchestrator reads the run's
+        # page id out before its first commit. Kept on the fake run because the
+        # real one has it.
+        facebook_page_id=uuid.uuid4(),
         # Read before the orchestrator's first commit and handed to S2.1, whose
         # ad identity is keyed on the provider that issued the ids.
         provider="scripted",
