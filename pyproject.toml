@@ -115,6 +115,10 @@ ignore = [
 # `ai_jobs` stores these names verbatim.
 "**/app/providers/data/errors.py" = ["N818"]
 "**/app/providers/ai/errors.py" = ["N818"]
+# `CsvExportTooLarge` is caught by name in `api/ads.py` to build a 413, and the
+# name says what happened rather than where it happened. Renaming it to
+# `...Error` would say less about the condition than the name does.
+"**/app/services/ad_csv.py" = ["N818"]
 "**/app/services/jobs.py" = ["N818"]
 
 [tool.ruff.lint.isort]

@@ -635,19 +635,30 @@ def test_an_ad_with_no_media_writes_nothing(db_session: Session) -> None:
     assert _links(db_session) == []
 
 
-def _positions(session: Session) -> dict[str, int | None]:
-    """`provider_key -> position`, read with a join rather than by zipping two lists.
+def _positions(session: Session, snapshot_id: object) -> dict[str, int | None]:
+    """`provider_key -> position` for **one** snapshot, read with a join.
 
     Zipping the asset list against the link list pairs rows *by position in two
     independently ordered queries*, which silently means the wrong thing the
     moment the two orders disagree -- and they disagree exactly when this
     checkpoint's behaviour is interesting. The join cannot be wrong that way.
+
+    **Scoped to one snapshot, and that is load-bearing.** An earlier version read
+    every link in the table into a dict keyed by `provider_key`, with no `ORDER BY`.
+    Once two snapshots hold the same keys -- which is precisely the "a new key was
+    added" case -- the dict kept whichever row PostgreSQL happened to return last,
+    so the assertion flipped between the first snapshot's ordinals and the second's
+    depending on the plan. It failed roughly one full-suite run in three and passed
+    when the file ran on its own, which is the hardest kind of failure to believe.
+    Naming the snapshot makes "whose ordinals are these" explicit, and the
+    `ORDER BY` makes the read deterministic within it.
     """
     session.expire_all()
     rows = session.execute(
-        select(MediaAsset.provider_key, AdSnapshotMedia.position).join(
-            AdSnapshotMedia, AdSnapshotMedia.media_asset_id == MediaAsset.id
-        )
+        select(MediaAsset.provider_key, AdSnapshotMedia.position)
+        .join(AdSnapshotMedia, AdSnapshotMedia.media_asset_id == MediaAsset.id)
+        .where(AdSnapshotMedia.ad_snapshot_id == snapshot_id)
+        .order_by(AdSnapshotMedia.position, MediaAsset.provider_key)
     ).all()
     return {str(key): position for key, position in rows}
 
@@ -711,7 +722,7 @@ def test_a_provider_reorder_does_not_rewrite_an_existing_position(db_session: Se
         page_id=page_id,
         record=_record(media=forward),
     )
-    captured = _positions(db_session)
+    captured = _positions(db_session, first_snapshot.id)
     assert captured == {"ord-a": 0, "ord-b": 1}
 
     _second_ad, second_snapshot = _observe(
@@ -723,7 +734,9 @@ def test_a_provider_reorder_does_not_rewrite_an_existing_position(db_session: Se
     )
 
     assert second_snapshot.id == first_snapshot.id, "a reorder minted a new snapshot"
-    assert _positions(db_session) == captured, "a later observation rewrote position"
+    assert _positions(db_session, first_snapshot.id) == captured, (
+        "a later observation rewrote position"
+    )
     assert len(_links(db_session)) == 2, "the reorder duplicated links"
 
 
@@ -791,7 +804,7 @@ def test_position_is_written_once_and_never_rewritten(db_session: Session) -> No
         page_id=page_id,
         record=_record(media=forward),
     )
-    captured = _positions(db_session)
+    captured = _positions(db_session, snapshot.id)
     assert captured == {"once-a": 0, "once-b": 1}
 
     link_snapshot_media(
@@ -803,7 +816,7 @@ def test_position_is_written_once_and_never_rewritten(db_session: Session) -> No
     )
     db_session.flush()
 
-    assert _positions(db_session) == captured, "a second link write rewrote position"
+    assert _positions(db_session, snapshot.id) == captured, "a second link write rewrote position"
     assert len(_links(db_session)) == 2, "the second write duplicated links"
 
 
@@ -896,7 +909,7 @@ def test_a_changed_key_set_makes_a_new_snapshot_which_takes_new_positions(
         page_id=page_id,
         record=_record(media=two),
     )
-    assert _positions(db_session) == {"set-a": 0, "set-b": 1}
+    assert _positions(db_session, first_snapshot.id) == {"set-a": 0, "set-b": 1}
 
     _ad_two, second_snapshot = _observe(
         db_session,
@@ -907,7 +920,7 @@ def test_a_changed_key_set_makes_a_new_snapshot_which_takes_new_positions(
     )
 
     assert second_snapshot.id != first_snapshot.id, "a new key did not make a snapshot"
-    assert _positions(db_session) == {"set-a": 1, "set-b": 2, "set-new": 0}
+    assert _positions(db_session, second_snapshot.id) == {"set-a": 1, "set-b": 2, "set-new": 0}
 
 
 def test_provider_order_is_preserved_in_position(db_session: Session) -> None:

@@ -63,10 +63,13 @@ def test_a_full_cursor_walk_works_with_sockets_blocked(
 def test_the_ai_provider_works_with_sockets_blocked(
     ai_provider: AIProvider, no_network: None
 ) -> None:
-    analysis = ai_provider.analyze_copy(
+    result = ai_provider.analyze_copy(
         CopyAnalysisRequest(copy_hash="mock-copy-hash-en-001", analysis_version="mock-v1")
     )
-    assert analysis.language == "en"
+    # S3.1 changed the return type to `AIResult(analysis, provider, model, usage)`.
+    # This test still read `.language` off the result itself, so it was failing from
+    # the moment S3.1 was pushed -- the guard it exists to provide was not running.
+    assert result.analysis.language == "en"
 
 
 def test_the_media_store_works_with_sockets_blocked(tmp_path: Path, no_network: None) -> None:

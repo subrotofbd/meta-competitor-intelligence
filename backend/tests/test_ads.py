@@ -541,12 +541,21 @@ def test_both_s22_digest_indexes_are_declared_with_a_named_access_pattern() -> N
     unindexed fails here instead of degrading silently into a full scan of the
     whole history.
     """
+    # S3.2 added two *expression* indexes to this table (the search projection over
+    # `normalized`), so the set is no longer exactly the two digest indexes. They are
+    # named rather than derived for the same reason: a rename that left the query
+    # unindexed must fail here rather than degrade into a scan of the whole history.
     assert {index.name for index in _table(AdSnapshot).indexes} == {
         "ix_ad_snapshots_copy_hash",
         "ix_ad_snapshots_creative_hash",
+        "ix_ad_snapshots_copy_fts_gin",
+        "ix_ad_snapshots_copy_trgm_gin",
     }
     for index in _table(AdSnapshot).indexes:
-        assert len(index.columns) == 1, index.name
+        # The two digest indexes are on a single real column each; the two search
+        # indexes have no columns at all, only an expression.
+        expected_columns = 1 if "hash" in index.name else 0
+        assert len(index.columns) == expected_columns, index.name
 
 
 def test_a_snapshot_may_hold_at_most_one_row_per_ad_per_run() -> None:
@@ -847,25 +856,36 @@ def test_seen_in_run_declares_no_relationship_and_the_models_declare_no_methods(
         assert declared == set(), f"{model.__name__} declares {sorted(declared)}"
 
 
-def test_no_s21_table_carries_a_text_search_index() -> None:
-    """`pg_trgm` was installed in S0.2 and still no GIN index is built on this schema.
+def test_exactly_one_s21_table_carries_a_text_search_index() -> None:
+    """This test used to assert that **no** GIN index existed on the S2.1 schema.
 
-    Ad copy is the text that will eventually be searched, but that query has still
-    not been written, and an index built before the query exists is how index
-    overengineering starts. `test_schema_integration` asserts the absence in the
-    database.
+    It existed to stop index overengineering: `pg_trgm` was installed in S0.2, and an
+    index built before the query that needs it is how that starts. S3.2 wrote the
+    search query and added the indexes it needs, so the guard has changed shape rather
+    than simply disappearing -- the intent is still "no index without a query behind
+    it", and it is now checkable in both directions.
 
-    **S2.2 added two btree indexes** on `ad_snapshots(copy_hash)` and
-    `(creative_hash)`. Those are not search indexes and do not weaken this test:
-    they are equality lookups for the duplicate-grouping queries that S2.2 also
-    wrote, and the guard is specifically about indexing copy *text* before
-    something queries it. Asserted on the index kind rather than on the count, so
-    a GIN or trigram index added later still fails here.
+    **S2.2's two btree indexes** on `ad_snapshots(copy_hash)` and `(creative_hash)`
+    were always exempt: they are equality lookups for duplicate-grouping queries
+    S2.2 also wrote, and the guard was always specifically about indexing copy *text*.
+
+    The two GIN indexes that now exist are the S3.2 search projection, declared by
+    migration `0011` and exercised by `test_the_search_indexes_exist` and
+    `test_the_search_query_matches_the_index_expression_exactly` in `test_api_ads.py`,
+    which also assert them in the live database. Every other S2.1 table must still have
+    no GIN index, which is what keeps the next index from being added speculatively.
     """
-    for model in S21_MODELS:
-        for index in _table(model).indexes:
-            using = index.dialect_options["postgresql"].get("using")
-            assert using != "gin", f"{model.__tablename__}.{index.name} is a GIN index"
+    gin_indexes = {
+        f"{model.__tablename__}.{index.name}"
+        for model in S21_MODELS
+        for index in _table(model).indexes
+        if index.dialect_options["postgresql"].get("using") == "gin"
+    }
+
+    assert gin_indexes == {
+        "ad_snapshots.ix_ad_snapshots_copy_fts_gin",
+        "ad_snapshots.ix_ad_snapshots_copy_trgm_gin",
+    }, gin_indexes
 
 
 def test_an_internal_id_is_never_stored_where_a_provider_id_belongs() -> None:

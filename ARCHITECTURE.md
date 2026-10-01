@@ -240,10 +240,39 @@ translations to trust. English summaries, if ever wanted, arrive as a **new `ana
 schema** -- never as columns bolted onto v1.
 
 ## API surface (slice 1)
-`/auth/*`, `/competitors`, `/competitors/{id}/pages`, `/collections` (start run, list runs, run detail),
-`/ads` (filters: competitor, country, platform, status, media_type, date range, min/max duration, funnel_stage,
-q full-text), `/ads/{id}` (+ `/snapshots`, `/media/{asset_id}`), `/ads/{id}/analyze`, `/exports/ads.csv`, `/healthz`.
-Search: PostgreSQL `tsvector` over copy + AI fields, `pg_trgm` for fuzzy. No external search engine in slice 1.
+Planned for the whole slice: `/auth/*`, `/competitors`, `/competitors/{id}/pages`, `/collections` (start run, list runs,
+run detail), `/ads`, `/ads/{id}` (+ `/snapshots`, `/media/{asset_id}`), `/ads/{id}/analyze`, `/exports/ads.csv`,
+`/healthz`.
+
+**Shipped so far (S3.2):** `GET /ads`, `GET /ads/{id}`, `GET /ads/{id}/snapshots`, `GET /exports/ads.csv`. Nothing
+else exists yet. In particular `/ads/{id}/analyze` is deliberately **absent** -- analysis is triggered by the collection
+pipeline, never by a page view -- and `/ads/{id}/media/{asset_id}` cannot exist until a byte-acquisition phase
+approves storing and serving media bytes.
+
+`/ads` filters, all optional: `provider`, `competitor_id`, `country`, `facebook_page_id`, `current_status`,
+`provider_active`, `data_origin`, `first_seen_from`/`first_seen_to`, `last_seen_from`/`last_seen_to`, `q`. Ordering is
+`sort` + `direction` from an **allowlist** (`last_seen_at`, `first_seen_at`, `meta_delivery_start`, `meta_ad_id`),
+default `last_seen_at DESC, id DESC`, with `id` always as the tie breaker because a batch upsert gives many ads the same
+`last_seen_at`. Paging is `page`/`page_size`, default 25, maximum 100.
+
+Filters **deferred**, each because it lives in JSONB or needs its own join and validation story: `platform`,
+`display_format`, `media_type`, `funnel_stage`, duration buckets, min/max duration, `language`, `confidence`,
+`has_analysis`, `copy_hash`, `creative_hash`.
+
+**One row per ad, with `contexts[]`.** There is no ad-level `current_status` anywhere in the API. S2.3 gives each
+`(ad, Page, country)` context its own conclusion, and a scalar would assert one of them as if it were the whole truth.
+
+Search: PostgreSQL `to_tsvector('simple', ...)` plus `pg_trgm` over the same four-field copy projection, both GIN,
+both **expression indexes** over `ad_snapshots.normalized` -- the copy text is read in place and never promoted to
+columns, because `normalized` is append-only evidence. `'simple'` rather than `'english'`: the corpus is Hindi and
+Hinglish, and an English stemmer mangles Devanagari. No external search engine in slice 1.
+
+**CSV export** is one row per ad **per context** (a CSV cannot nest), UTF-8, header always present, ISO-8601 UTC
+timestamps, NULL as an empty cell. A cell beginning `=`, `+`, `-`, `@`, TAB or CR is prefixed with a single quote,
+because provider ad copy routinely begins with `-` or `+` and a spreadsheet would execute it as a formula. The export
+is capped, and exceeding the cap returns **413** rather than truncating: a truncated file is indistinguishable from a
+complete one. No `raw_ref`, queue id, prompt, raw model response or `storage_key` appears in any response, in JSON or
+in CSV.
 
 ## Security
 Secrets only in env (`.env.example`, `.env` gitignored). Argon2 password hashing, short-lived JWT + refresh, role checks

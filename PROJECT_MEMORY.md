@@ -1664,7 +1664,8 @@ contain its own hash, so it is recorded here in this follow-up commit, as at S0.
 `origin` remote (`subrotofbd/meta-competitor-intelligence`) is now configured, and S2.3 already sits
 on `origin/main`. **S2.4 is complete and pushed** -- `ff7ba7d` and its three follow-ups
 (`0fa5736`, `47ec45e`, `40af781`) are all on `origin/main`, whose head is `40af781`.
-**S3.1 is the unpushed work:** committed locally, not yet on `origin/main`.
+**S3.1 is complete and pushed.** Correcting the note that stood here, which said S3.1 was unpushed:
+`bb7eb9b`, `9adc1bc` and `df3160d` are all on `origin/main`, whose head was `df3160d` when S3.2 began.
 
 **`media_assets`** -- `(provider, provider_key)` unique, `source_url`, `mime`, `width`, `height`,
 `duration_seconds NUMERIC`, `storage_key`, `byte_size`, `first_seen_at`, `last_seen_at`.
@@ -2060,3 +2061,173 @@ collection ordering **passed after updating the revision-chain assertions for `0
 **Deferred deliberately:** a real AI provider and SDK (needs an `AGENTS.md` section 12 amendment), the
 worker consumer loop, an API surface for triggering analysis, English summary fields, media byte
 acquisition, `S3Store`, and `creative_hash` v2.
+
+---
+
+## 2026-10-02, Checkpoint S3.2 -- ad read API, search, CSV export
+
+Approved on the explicit go-ahead given at the start of this session. Resumed once after a Plan-mode
+interruption; no work from before the interruption was discarded.
+
+**Scope shipped.** `GET /ads`, `GET /ads/{id}`, `GET /ads/{id}/snapshots`, `GET /exports/ads.csv`. Four
+routes, all reads. No route calls `AIProvider`, enqueues a job, fetches media, or writes anything --
+analysis is *surfaced* here, never *caused*, so a page view cannot spend money or start a collection.
+
+**Files added**
+- `backend/app/schemas/ads.py` -- hand-written response models, `extra="forbid"`. Not
+  `from_attributes` wrappers: adding a table column must never silently publish it.
+- `backend/app/services/ad_query.py` -- filters, allowlisted sort, paging, batched assembly.
+- `backend/app/services/ad_search.py` -- the copy projection, `tsvector` and trigram matching.
+- `backend/app/services/ad_csv.py` -- formula-injection defence, NULL rendering, the row cap.
+- `backend/app/api/ads.py`, `backend/app/api/errors.py` -- routing and serialisation, no SQL.
+- `backend/app/main.py` (rewritten) -- router inclusion, exception handlers, docs gating.
+- `backend/tests/asgi_client.py`, `backend/tests/test_api_ads.py` -- 98 tests.
+- `database/migrations/versions/0011_api_search_indexes.py` -- two GIN expression indexes.
+
+**Decisions locked**
+- **One row per ad, with `contexts[]`. There is no ad-level `current_status` anywhere.** S2.3 gives each
+  `(ad, Page, country)` its own conclusion; a scalar would assert one as the whole truth. Pinned by
+  `test_there_is_never_an_ad_level_status`.
+- **Analysis joined on `latest_snapshot.copy_hash -> ad_analysis.copy_hash`,** never on
+  `source_ad_snapshot_id`, so copy-scoped reuse actually reaches every ad running the same words.
+- **`AI_INTERPRETATION` travels in the payload,** in JSON and in the CSV. Joining to `ads.data_origin`
+  would otherwise let a client present model output as `PROVIDER_DATA`.
+- **Media exposes references only,** with `bytes_available: false` hard-coded. No `storage_key`.
+- **CSV is one row per ad per context**, header always, ISO-8601 UTC, NULL as an empty cell, formula
+  prefixes neutralised, and **413 rather than truncation** above `MAX_EXPORT_ROWS`.
+- **Filter errors are 400, not 422.** 422 is reserved for a request FastAPI could not parse; a client
+  that sees 422 retries the same broken request forever. Page beyond the end is empty items plus the
+  true total, not a 404.
+- **`/docs` and `/openapi.json` are gated on `app_env`.** This closes the S0.1 review item, which could
+  not be closed before any route existed.
+
+**Four bugs found and fixed while building, all verified by mutation**
+
+1. **The search query could never match its own index.** `normalized[name].astext` renders the JSON key
+   as a *bind parameter*. Verified against the live schema with `EXPLAIN`: on a **custom plan**
+   PostgreSQL substitutes the value and the index is used, so search looks healthy at first; under a
+   **generic plan** -- which PostgreSQL switches to after five executions, the normal steady state for a
+   hot query -- the key is a `Param`, the expressions do not match, and the query falls back to a
+   sequential scan. Correct results, no error, no signal. Fixed with `literal_column` for the keys, the
+   `' '` separator, the `coalesce` default and the `'simple'` config, so the query is byte-for-byte the
+   index expression. **The fix was verified with `EXPLAIN EXECUTE` under `plan_cache_mode =
+   force_generic_plan`**, not assumed; the parameterised form was confirmed not to match.
+2. **`_apply_filters` implemented none of the context filters.** `country`, `facebook_page_id`,
+   `current_status`, `provider_active` and `competitor_id` were accepted by the route, validated, and
+   then silently ignored. Found because two tests failed; restoring the original `list_ads` behaviour did
+   not make them pass, which is what identified it as a real defect rather than a bad test.
+3. **`with_media` defaulted to off in the service,** so the list endpoint and the CSV always reported
+   zero media. The router and the exporter now ask for it explicitly.
+4. **`literal_column` for `'simple'`** -- part of fix 1; a bound REGCONFIG is a `Param` too.
+
+**Migration `0011_api_search_indexes`.** Additive only: two GIN expression indexes, no column, no table,
+no row. `op.create_index` could not build either of them -- it quotes a plain string as an *identifier*
+("column does not exist"), and `sa.text()` then makes `postgresql_ops` render the opclass inside the
+concatenation ("syntax error at `||`"). An opclass on an expression index needs its own parentheses in
+PostgreSQL, which no helper expresses, so both are written as explicit SQL.
+
+**Three copies of the projection, deliberately.** `services/ad_search.py` (query), `models/ads.py`
+(index declaration), migration `0011` (DDL). `models` must not import from `services`, and a migration
+should record what the rule *is*. Drift between them is silent and expensive, so
+`test_every_copy_of_the_search_projection_agrees` compares all three, and
+`test_the_search_query_matches_the_index_expression_exactly` pins every literal so none can quietly
+become a bind parameter again.
+
+**`alembic check` needed an `include_object` hook.** PostgreSQL deparses a stored expression with
+`::text` and `::regconfig` casts that SQLAlchemy never emits, so autogenerate reported both indexes as
+*remove and add*. `migrations/env.py` now excludes those two by name. Excluding them is the honest fix:
+a permanently red gate stops being read, and a real change to any table, column, constraint or ordinary
+index is still caught.
+
+**Test infrastructure: no new dependency.** `fastapi.testclient.TestClient` requires `httpx`, which this
+project does not install. Adding a package is a decision for a human, so `tests/asgi_client.py` drives
+the ASGI application directly -- roughly 60 lines, in-process, no network. The tests therefore exercise
+the *real* application: routing, dependency overrides, exception handlers, status codes and all. Two
+harness facts worth recording:
+- the driver advertises ASGI `spec_version` **2.4**. Below 2.4 Starlette races `stream_response` against
+  a task waiting for `http.disconnect`, and a `receive()` that returns promptly cancels the stream before
+  a single body chunk is sent -- the CSV endpoint came back **200 with an empty body**. That was a
+  harness artefact, not an application defect.
+- Starlette's `ServerErrorMiddleware` sends a 500 and *then* re-raises, so the driver reads the response
+  from whatever was sent and only re-raises if nothing was sent. This is what
+  `TestClient(raise_server_exceptions=False)` does.
+
+**Tests.** `test_api_ads.py`, **98 tests, all passing**. Two mutations were applied, confirmed to have
+changed the code, run, and reverted: reverting the JSON key to a bind parameter failed 3 tests, and
+disabling the context filters failed 2. Regression on `test_migrations.py`, `test_models.py`,
+`test_db_integration.py`, `test_architecture_boundaries.py`, `test_media_url_security.py`,
+`test_config.py`, `test_fixture_safety.py`: **221 passing**. `test_migrations.py` needed its expected
+revision list updated to include `0011_api_search_indexes`.
+
+**Gate status.** `ruff check backend` clean; `ruff format --check` clean; project-gate `mypy` clean
+(54 files); `alembic check` reports no drift; `alembic current` = `0011_api_search_indexes (head)`, single
+head. `mypy backend` is at **59**, unchanged from the S3.1 baseline -- S3.2 added zero.
+
+**Documentation corrected.** `ARCHITECTURE.md`'s API section claimed filters and routes that do not exist
+(`platform`, `media_type`, `funnel_stage`, min/max duration, `/ads/{id}/analyze`, `/healthz`); it now
+separates what shipped from what is planned, and records the search, CSV and provenance rules. The
+`PROJECT_MEMORY.md` line calling S3.1 unpushed is corrected.
+
+**Not corrected, deliberately.** `0001_pg_trgm`'s docstring says the first GIN trigram index comes in
+"S1.1". It came in S3.2. The file is an applied migration and a historical record, so its prose was left
+alone rather than rewritten; noted here instead.
+
+**Known limitations**
+- **Every table is still 0 rows**, so no query plan, index choice or paging behaviour has been
+  validated against real data. The `EXPLAIN` results above prove the index *matches*; they cannot prove
+  it is chosen once there are rows to choose between.
+- **`_assemble` issues 5 queries per page** (4 + the count). The count is asserted fixed across page
+  sizes 1 and 5, which catches an N+1, but the number itself is not a tuned figure.
+- **`provider_active` filtering is `IS true/false`.** An ad with no context row is therefore excluded by
+  any context filter, which is correct but untested against a corpus where that is common.
+- **No `/healthz`**, so compose cannot yet depend on this service.
+- **No authentication.** Every endpoint is unauthenticated; this is a post-S3 seam and the docs gating
+  is the only production hardening in place.
+- **Timezone inputs are naive-parsed.** `first_seen_from` without an offset is interpreted by FastAPI as
+  UTC, which is right for this product but is FastAPI's default rather than an explicit decision here.
+- **`MediaReferenceOut.bytes_available` is a hard-coded `false`**, correct until a byte-acquisition
+  checkpoint exists. Nothing verifies it against `storage_key` being NULL.
+- **Search covers four copy fields only.** `destination_url` is excluded deliberately; a user searching
+  for a URL will not find it.
+
+**Next checkpoint: not started, and not to be started without explicit approval.** The remaining S3
+scope is the frontend Ad Library UI plus the operator surface (`/competitors`, `/collections`), `/healthz`,
+and the worker consumer loop. Any of those needs a separate go-ahead.
+
+### Three pre-existing red tests found while running the full suite
+
+S3.2 ran the whole suite rather than only its own tests, which surfaced defects that
+earlier checkpoints had shipped. **All three were confirmed against `origin/main`**
+(`df3160d`, via a detached `git worktree`) before being touched, so none is an S3.2
+regression, and none involved changing a shipped contract.
+
+1. **`test_db_base.py::test_the_metadata_holds_exactly_the_s2_tables`** asserted
+   `set(Base.metadata.tables) == S2_TABLES`. S3.1 added `ad_analysis` and `ai_jobs` and
+   did not update it, so it has been **red since S3.1 was pushed**. `test_models.py` now
+   has `S31_TABLES`, `S32_TABLES` (empty, and named anyway: "this checkpoint added
+   nothing structural" is an assertion worth making) and `ALL_TABLES`, and the test
+   asserts `ALL_TABLES`. Its name no longer says "s2".
+2. **`test_offline_guard.py::test_the_ai_provider_works_with_sockets_blocked`** read
+   `.language` off `analyze_copy`'s return value. S3.1 changed that return type to
+   `AIResult(analysis, provider, model, usage)`, so the test raised `AttributeError` --
+   **the no-network guard was not running at all**.
+3. **`test_media_references.py::_positions`** read *every* `ad_snapshot_media` row into
+   a dict keyed by `provider_key` with **no `ORDER BY`**. Once two snapshots held the
+   same keys -- exactly the "a new key was added" case -- the dict kept whichever row
+   PostgreSQL returned last, so `test_a_changed_key_set_makes_a_new_snapshot_which_takes_new_positions`
+   flipped between the first snapshot's ordinals and the second's. It failed roughly
+   **one full-suite run in three** and passed whenever the file ran on its own. Now
+   scoped to a named snapshot with an explicit `ORDER BY`.
+
+**A permanently red gate is worse than no gate**, which is the through-line: all three
+were assertions that would have caught a real problem and had been failing silently
+since they were written. S3.2 fixed them rather than reporting a green suite it knew
+was not true. The lesson recorded for future checkpoints: **run the full suite before
+claiming a checkpoint is green.** A green assertion nobody re-ran is not a guarantee.
+
+**Suite state after the fixes: 1130 passed, 0 failed, four consecutive full runs.**
+
+### Two stale doc references left uncorrected
+
+`test_ads.py` and `test_models.py` both refer to a `test_schema_integration` that does
+not exist under that name. Pre-existing, outside S3.2, left alone.

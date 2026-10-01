@@ -80,6 +80,49 @@ from app.providers.data.provenance import DataOrigin
 #: comparison unequal, and no snapshot would ever be written again.
 _CONTENT_HASH_CHECK = "content_hash ~ '^[0-9a-f]{64}$'"
 
+# ---- S3.2 search projection -------------------------------------------
+#
+# The copy text exists in exactly one place: inside `normalized`. S3.2 indexes it
+# **in place** rather than promoting it to columns, because `normalized` is
+# append-only evidence (`AGENTS.md` section 8) and a generated column would be a
+# second copy of provider text to keep in step with the first.
+#
+# Two GIN indexes over one projection: full text for whole words, trigram for
+# partial matching. Covering the same text with both is deliberate -- a fuzzy
+# index over `primary_text` alone would miss a headline hit, which reads as
+# "search is unreliable".
+#
+# **Written out rather than imported** from `services/ad_search.py`, because
+# `models` must not depend on `services`. That makes this one of three copies (the
+# second is migration `0011`), and drift between them is silent and expensive: an
+# index whose expression differs from the query's is simply unused.
+# `test_every_copy_of_the_search_projection_agrees` renders all three and fails
+# if they differ.
+_COPY_SEARCH_FIELDS: tuple[str, ...] = ("primary_text", "headline", "description", "cta")
+_COPY_SEARCH_PROJECTION: str = " || ' ' || ".join(
+    f"coalesce(normalized->>'{field}', '')" for field in _COPY_SEARCH_FIELDS
+)
+
+#: Indexes that exist in the database but cannot be expressed in ORM metadata, so
+#: Alembic autogenerate must be told to skip them.
+#:
+#: The two S3.2 search indexes are expression indexes over `normalized`. Declared
+#: above as `sa.text(...)` so they are documented in one place, but autogenerate
+#: cannot round-trip them: PostgreSQL deparses the stored expression with `::text`
+#: and `::regconfig` casts that SQLAlchemy never emits, so each one compares as
+#: *both* a remove and an add.
+#:
+#: It lives here, not in `migrations/env.py`, because `env.py` reads
+#: `alembic.context` at module level and so cannot be imported outside a migration
+#: run -- `test_the_database_matches_the_models_with_no_drift` needs the same list
+#: and must not restate it.
+SEARCH_EXPRESSION_INDEX_NAMES: frozenset[str] = frozenset(
+    {
+        "ix_ad_snapshots_copy_fts_gin",
+        "ix_ad_snapshots_copy_trgm_gin",
+    }
+)
+
 
 class Ad(Base, UuidPrimaryKeyMixin, TimestampMixin):
     """One ad, identified for as long as we keep collecting.
@@ -290,6 +333,20 @@ class AdSnapshot(Base, UuidPrimaryKeyMixin, TimestampMixin):
         # than the handful of NULL rows it would save.
         Index("ix_ad_snapshots_copy_hash", "copy_hash"),
         Index("ix_ad_snapshots_creative_hash", "creative_hash"),
+        # S3.2 search. `sa.text` because a plain string would be quoted as an
+        # identifier; declared here so `alembic check` compares against metadata that
+        # can actually see the index instead of reporting it as drift to remove.
+        Index(
+            "ix_ad_snapshots_copy_fts_gin",
+            sa.text(f"to_tsvector('simple', {_COPY_SEARCH_PROJECTION})"),
+            postgresql_using="gin",
+        ),
+        Index(
+            "ix_ad_snapshots_copy_trgm_gin",
+            sa.text(_COPY_SEARCH_PROJECTION),
+            postgresql_using="gin",
+            postgresql_ops={_COPY_SEARCH_PROJECTION: "gin_trgm_ops"},
+        ),
     )
 
 

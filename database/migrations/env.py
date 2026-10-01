@@ -34,10 +34,36 @@ target_metadata = Base.metadata
 # imported names are unused here on purpose -- the import *is* the effect -- so
 # the warning is silenced rather than faked with a dummy assignment.
 from app import models  # noqa: E402,F401
+from app.models.ads import SEARCH_EXPRESSION_INDEX_NAMES  # noqa: E402
 
 # Compare column types as well as names/columns, so a changed type is caught
 # instead of silently ignored.
 _COMPARE_TYPE = True
+
+#: Indexes that exist in the database but cannot be expressed in ORM metadata.
+#:
+#: S3.2's two search indexes are expression indexes over `ad_snapshots.normalized`.
+#: They are declared on the model as `sa.text(...)` so they are documented in one
+#: place, but autogenerate cannot round-trip them, so the comparison reports each
+#: as both "remove" and "add". See `models.ads.SEARCH_EXPRESSION_INDEX_NAMES` for the
+#: full reasoning -- it lives there rather than here because `env.py` reads
+#: `alembic.context` at module level and so cannot be imported by anything else.
+#:
+#: Excluding them by name is the honest fix. Leaving the noise in place would make
+#: `alembic check` permanently red, and a permanently red gate stops being read --
+#: which is how real drift gets shipped. Everything else is still compared, so a
+#: genuine change to a table, column, constraint or ordinary index is still caught.
+#:
+#: The indexes themselves are still fully tracked by migration `0011`, which is
+#: what actually creates and drops them.
+_EXPRESSION_INDEX_NAMES = SEARCH_EXPRESSION_INDEX_NAMES
+
+
+def include_object(object_, name, type_, reflected, compare_to) -> bool:
+    """Filter the two un-representable expression indexes out of the comparison."""
+    if type_ == "index" and name in _EXPRESSION_INDEX_NAMES:
+        return False
+    return True
 
 
 def run_migrations_offline() -> None:
@@ -51,6 +77,7 @@ def run_migrations_offline() -> None:
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
         compare_type=_COMPARE_TYPE,
+        include_object=include_object,
     )
     with context.begin_transaction():
         context.run_migrations()
@@ -71,6 +98,7 @@ def run_migrations_online() -> None:
                 connection=connection,
                 target_metadata=target_metadata,
                 compare_type=_COMPARE_TYPE,
+                include_object=include_object,
             )
             with context.begin_transaction():
                 context.run_migrations()

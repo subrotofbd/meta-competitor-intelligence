@@ -18,17 +18,22 @@ from app.db.base import Base
 pytestmark = pytest.mark.unit
 
 
-def test_the_metadata_holds_exactly_the_s2_tables() -> None:
-    """The base is the single registry every table joins, and it holds S1 + S2.1.
+def test_the_metadata_holds_exactly_the_shipped_tables() -> None:
+    """The base is the single registry every table joins, and it holds everything shipped.
 
     S0.2 asserted this metadata was empty. S1.1 added 5 tables, S1.2 the jobs
-    table, and S2.1 the three ad-history tables. The cumulative scope is 9. This
-    test asserts the cumulative scope while the per-checkpoint boundary tests in
-    test_models.py assert the assignments specifically.
-    """
-    from tests.test_models import S2_TABLES
+    table, S2.1 the three ad-history tables, S2.3 one status table, S2.4 two media
+    tables, and S3.1 two analysis tables. This test asserts the cumulative scope
+    while the per-checkpoint boundary tests in `test_models.py` assert the
+    assignments specifically.
 
-    assert set(Base.metadata.tables) == S2_TABLES
+    The name said "s2" and the assertion said `S2_TABLES` while the scope had moved
+    on, so S3.1 pushed this test **already failing** -- it was never re-run. It
+    asserts `ALL_TABLES` now.
+    """
+    from tests.test_models import ALL_TABLES
+
+    assert set(Base.metadata.tables) == ALL_TABLES
     assert Base.metadata.naming_convention, "the naming convention must survive S2.1"
 
 

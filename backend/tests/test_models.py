@@ -67,8 +67,26 @@ S23_TABLES: frozenset[str] = frozenset({"ad_status_by_context"})
 #: the evidence, and the evidence itself is not altered.
 S24_TABLES: frozenset[str] = frozenset({"media_assets", "ad_snapshot_media"})
 
+#: S3.1 adds exactly two tables. `ad_analysis` is **copy-scoped**
+#: (`UNIQUE(copy_hash, analysis_version)`, not keyed on `ad_id`), and `ai_jobs` is a
+#: per-provider-CALL attempt ledger rather than a work queue. Pinned as a literal so
+#: a table appearing here without an approved checkpoint is visible.
+S31_TABLES: frozenset[str] = frozenset({"ad_analysis", "ai_jobs"})
+
+#: S3.2 adds **no table at all** -- migration `0011_api_search_indexes` is two
+#: expression indexes and nothing else. Named anyway, because "this checkpoint added
+#: nothing structural" is an assertion worth making explicitly rather than by absence.
+S32_TABLES: frozenset[str] = frozenset()
+
 #: The cumulative S2 scope, which is everything that exists after S2.4.
 S2_TABLES = S1_TABLES | S21_TABLES | S22_TABLES | S23_TABLES | S24_TABLES
+
+#: Everything that exists now. `test_the_metadata_holds_exactly_the_s2_tables` in
+#: `test_db_base.py` asserts against this, not against `S2_TABLES` -- it did assert
+#: against `S2_TABLES`, and S3.1 shipped two tables without updating it, so the test
+#: was red from the moment S3.1 was pushed. A green assertion nobody re-ran is not a
+#: guarantee.
+ALL_TABLES = S2_TABLES | S31_TABLES | S32_TABLES
 
 S11_MODELS = (Competitor, FacebookPage, CollectionRun, ProviderRun, RawResponse)
 

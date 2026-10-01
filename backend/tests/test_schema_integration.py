@@ -70,6 +70,7 @@ S23_REVISION = "0007_status_by_context"
 S24_REVISION = "0008_media_assets"
 S31_REVISION = "0009_ai_analysis"
 S31_FIX_REVISION = "0010_ai_jobs_cost_name"
+S32_REVISION = "0011_api_search_indexes"
 BASE_REVISION = "0001_pg_trgm"
 
 NOW = datetime(2026, 9, 30, 9, 0, tzinfo=UTC)
@@ -137,7 +138,7 @@ def test_the_migration_applies_and_leaves_one_head() -> None:
     assert len(ScriptDirectory.from_config(_config()).get_heads()) == 1
     with get_engine().connect() as connection:
         applied = connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-    assert applied == S31_FIX_REVISION
+    assert applied == S32_REVISION
 
 
 def test_the_s24_downgrade_renders_complete_sql_without_executing_it() -> None:
@@ -254,7 +255,7 @@ def test_media_assets_carries_no_foreign_key() -> None:
 
 
 def test_the_revision_history_is_one_unbranched_chain() -> None:
-    """Eight revisions, one chain. Two heads means no single `upgrade` reaches it.
+    """Eleven revisions, one chain. Two heads means no single `upgrade` reaches it.
 
     Asserted as a whole rather than one link per checkpoint: a partial chain check
     passes even when a later revision branches off, and the failure it would miss is
@@ -264,6 +265,7 @@ def test_the_revision_history_is_one_unbranched_chain() -> None:
     revisions = {revision.revision: revision.down_revision for revision in script.walk_revisions()}
 
     assert revisions == {
+        S32_REVISION: S31_FIX_REVISION,
         S31_FIX_REVISION: S31_REVISION,
         S31_REVISION: S24_REVISION,
         S24_REVISION: S23_REVISION,
@@ -275,7 +277,7 @@ def test_the_revision_history_is_one_unbranched_chain() -> None:
         S11_REVISION: BASE_REVISION,
         BASE_REVISION: None,
     }
-    assert list(script.get_heads()) == [S31_FIX_REVISION]
+    assert list(script.get_heads()) == [S32_REVISION]
 
 
 def test_the_s23_downgrade_renders_complete_sql_without_executing_it() -> None:
@@ -489,23 +491,36 @@ def test_pg_trgm_is_still_installed_after_s11() -> None:
     assert version
 
 
-def test_no_trigram_or_text_index_exists_yet() -> None:
-    """S1.1 creates no search index, deliberately.
+def test_exactly_the_s32_search_indexes_exist_and_no_others() -> None:
+    """This guard used to assert that **no** trigram or text index existed at all.
 
-    The only text `ARCHITECTURE.md` asks to search is ad copy, which is S2.1.
-    Adding a GIN index now would be indexing a column that does not exist.
+    The reasoning behind it still holds: `pg_trgm` was installed in S0.2, and an
+    index built before the query that needs it is how index overengineering starts.
+    S2.1 and S3.1 both re-ran the assertion unchanged, each time noting that
+    `ad_snapshots.normalized` held ad copy but nothing queried it yet.
 
-    Unchanged by S2.1: `ad_snapshots.normalized` now exists and *does* hold ad
-    copy, but the query that would search it is S2.2's to write first, and an
-    index built before the query exists is how index overengineering starts. The
-    assertion is re-run here on purpose -- a checkpoint that adds a searchable
-    column is exactly the moment this guard could quietly stop applying.
+    S3.2 wrote the query, so the guard changes shape rather than disappearing. The
+    intent is now enforceable in both directions: exactly the two search indexes
+    `0011_api_search_indexes` creates, and not one more. A third would be indexing
+    something no query asks for, which is precisely what this test has always been
+    about.
+
+    Both are named explicitly rather than pattern-matched, so a rename -- which
+    would leave the query unindexed -- fails here instead of degrading silently.
     """
     with get_engine().connect() as connection:
-        names = connection.execute(
-            text("SELECT indexname FROM pg_indexes WHERE schemaname = 'public'")
-        ).scalars()
-    assert not [name for name in names if name.startswith("gin_") or "trgm" in name]
+        names = set(
+            connection.execute(
+                text("SELECT indexname FROM pg_indexes WHERE schemaname = 'public'")
+            ).scalars()
+        )
+
+    assert {
+        name for name in names if name.startswith("gin_") or "trgm" in name or "gin" in name
+    } == {
+        "ix_ad_snapshots_copy_fts_gin",
+        "ix_ad_snapshots_copy_trgm_gin",
+    }
 
 
 def test_the_s11_downgrade_renders_complete_sql_without_executing_it() -> None:
@@ -971,11 +986,40 @@ def test_the_database_matches_the_models_with_no_drift() -> None:
     while the metadata reported no difference. It is the single most valuable
     assertion in this file: everything else describes the schema, this one
     proves the schema in the database is the schema in the code.
+
+    **S3.2 excludes the two search expression indexes**, via
+    `models.ads.SEARCH_EXPRESSION_INDEX_NAMES` -- the same list
+    `database/migrations/env.py` uses for `alembic check`, imported rather than
+    restated so the CLI and this test cannot disagree. `env.py` itself cannot be
+    imported here: it reads `alembic.context` at module level, which is only
+    populated during a migration run.
+
+    Autogenerate cannot round-trip an expression index over JSONB: PostgreSQL
+    deparses the stored expression with `::text` and `::regconfig` casts that
+    SQLAlchemy never emits, so each index compares as *both* remove and add.
+
+    Everything else is still compared, so a real change to a table, column,
+    constraint or ordinary index still fails here.
     """
+    from app.models.ads import SEARCH_EXPRESSION_INDEX_NAMES
+
+    def include_object(
+        object_: object, name: str | None, type_: str, reflected: bool, compare_to: object
+    ) -> bool:
+        """The same exclusion `env.py` applies, from the same list."""
+        return not (type_ == "index" and name in SEARCH_EXPRESSION_INDEX_NAMES)
+
     with get_engine().connect() as connection:
         context = MigrationContext.configure(
             connection,
-            opts={"compare_type": True, "compare_server_default": True},
+            opts={
+                "compare_type": True,
+                "compare_server_default": True,
+                # The hook goes on the context, not on `compare_metadata` -- Alembic
+                # reads it from `context_opts`. This is the same wiring `env.py`
+                # produces via `context.configure(include_object=...)`.
+                "include_object": include_object,
+            },
         )
         operations = compare_metadata(context, Base.metadata)
 
