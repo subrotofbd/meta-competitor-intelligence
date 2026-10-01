@@ -55,6 +55,8 @@ from app.providers.data.base import AdDataProvider
 from app.providers.data.errors import Blocked, RateLimited, SchemaChanged, Transient
 from app.providers.data.models import PageRef, ProviderResult, RawAdRecord
 from app.providers.data.normalize import NormalizationError, normalize_payload
+from app.providers.data.provenance import DataOrigin
+from app.services.ad_persistence import ObservedRecord, persist_observations
 from app.services.jobs import JobQueue, JobRequest
 
 #: The job kind for a single page/country collection run.
@@ -344,6 +346,8 @@ class CollectionOrchestrator:
             url=run.facebook_page.url,
         )
         collection_run_id = run.id
+        provider_name = run.provider
+        data_origin = run.data_origin
 
         run.status = CollectionRunStatus.RUNNING
         run.started_at = datetime.now(UTC)
@@ -351,6 +355,7 @@ class CollectionOrchestrator:
 
         records: list[RawAdRecord] = []
         errors: list[NormalizationError] = []
+        observed: list[ObservedRecord] = []
         cursor: str | None = None
         # Cursors already followed in *this* execution. A cursor is opaque to us:
         # we compare for equality and nothing else, so no provider-specific idea
@@ -405,7 +410,7 @@ class CollectionOrchestrator:
                 # evidence with it. This happens before either safety check
                 # below, so a run that halts has still stored the page that
                 # caused it to halt.
-                self._persist_provider_run(collection_run_id, result)
+                raw_response = self._persist_provider_run(collection_run_id, result)
                 self._session.commit()
 
                 # Now read it. This is the first moment in the whole flow where
@@ -414,6 +419,15 @@ class CollectionOrchestrator:
                 reading = normalize_payload(result.raw)
                 records.extend(reading.records)
                 errors.extend(reading.errors)
+                # Each record is paired with the response it was read from,
+                # because a snapshot has to be able to cite its own source.
+                # Accumulated across the whole walk rather than persisted page
+                # by page: a provider can serve one ad on two pages of the same
+                # run, and that is one snapshot rather than two.
+                observed.extend(
+                    ObservedRecord(record=record, raw_response_id=raw_response.id)
+                    for record in reading.records
+                )
                 # Counted over *attempts*, readable or not. Counting only the
                 # readable ones would let a provider serving well-formed
                 # unreadable records grow errors for ever without this number
@@ -444,8 +458,19 @@ class CollectionOrchestrator:
                     )
                     break
 
-            # Every payload was stored. The run's status now reports how well
-            # they read, which is a different fact from whether they arrived.
+            # Every payload was stored and committed. Normalised persistence
+            # comes after that, and in its own transaction, so a failure here
+            # cannot take the raw evidence with it -- and cannot leave half an
+            # ad's history behind either.
+            self._persist_ad_history(
+                run_id=collection_run_id,
+                observed=observed,
+                provider=provider_name,
+                data_origin=data_origin,
+            )
+
+            # The run's status now reports how well the payloads read, which is
+            # a different fact from whether they arrived.
             run.finished_at = datetime.now(UTC)
             run.records_returned = len(records)
             status, error_type = _resolve_outcome(stopped, errors)
@@ -684,7 +709,40 @@ class CollectionOrchestrator:
         ).first()
         return recent is not None
 
-    def _persist_provider_run(self, run_id: uuid.UUID, result: ProviderResult) -> ProviderRun:
+    def _persist_ad_history(
+        self,
+        *,
+        run_id: uuid.UUID,
+        observed: Sequence[ObservedRecord],
+        provider: str,
+        data_origin: DataOrigin,
+    ) -> None:
+        """Write the run's ads, snapshots and observation links.
+
+        All of it or none of it. A partial write would be worse than no write:
+        an ad whose snapshot was never stored has a `latest_snapshot_id` pointing
+        at nothing, and a reader has no way to tell that from an ad we know
+        nothing about. So a failure rolls the normalized layer back and lets the
+        run record itself as failed.
+
+        The raw responses are safe either way -- they were committed page by page
+        before any of this -- which is what makes reprocessing possible rather
+        than lossy.
+        """
+        try:
+            persist_observations(
+                self._session,
+                run_id=run_id,
+                observations=observed,
+                provider=provider,
+                data_origin=data_origin,
+            )
+            self._session.commit()
+        except Exception:
+            self._session.rollback()
+            raise
+
+    def _persist_provider_run(self, run_id: uuid.UUID, result: ProviderResult) -> RawResponse:
         """Persist a single provider call and its raw response.
 
         Creates provider_run and raw_response rows. This is the only place a
@@ -721,7 +779,7 @@ class CollectionOrchestrator:
         self._session.add(raw_response)
         self._session.flush()
 
-        return provider_run
+        return raw_response
 
 
 def _excerpt(text: str) -> str:

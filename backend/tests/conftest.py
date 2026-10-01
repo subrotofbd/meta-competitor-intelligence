@@ -18,7 +18,9 @@ from __future__ import annotations
 import json
 import logging
 import socket
+import uuid
 from collections.abc import Callable, Iterator
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -185,6 +187,45 @@ def mock_analyses() -> dict[str, CopyAnalysis]:
         key: CopyAnalysis(**value)
         for key, value in _read_fixture("ai", "analyses.json")["responses"].items()
     }
+
+
+# ============================================================
+# Stand-ins for fake-session tests
+# ============================================================
+
+
+@dataclass
+class StubAd:
+    """An `Ad` stand-in for tests whose "database" is a recording object.
+
+    Deliberately *not* an `Ad`: these tests are about what a walk decides, not
+    about what gets stored, and modelling the row properly would mean building a
+    small database inside a test helper. `latest_snapshot_id` is `None` because
+    a fake session has never stored a snapshot, which is the truth.
+    """
+
+    id: uuid.UUID
+    meta_ad_id: str
+    latest_snapshot_id: uuid.UUID | None = None
+
+
+class StubResult:
+    """What a fake session's `execute` returns: one row, and nothing else."""
+
+    def __init__(self, row: object) -> None:
+        self._row = row
+
+    def scalar_one(self) -> object:
+        return self._row
+
+    def scalar_one_or_none(self) -> object:
+        return self._row
+
+    def first(self) -> None:
+        return None
+
+    def all(self) -> list[object]:
+        return [self._row]
 
 
 @pytest.fixture

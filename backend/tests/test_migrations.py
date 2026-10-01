@@ -45,18 +45,22 @@ def test_history_is_a_single_linear_chain() -> None:
     """One revision per checkpoint, each naming exactly one parent.
 
     S0.2 asserted a single revision. S1.1 adds the second. S1.2 adds the third.
-    The assertion becomes the property that survives it: a chain with no branch
-    and no gap, so `alembic upgrade head` from `base` reaches the whole schema
-    in order.
+    S2.1 adds the fourth and the fifth -- the second is a repair of the first, not
+    new scope, and it is called out here so the extra revision is never mistaken
+    for scope nobody declared. The assertion is the property that survives all of
+    it: a chain with no branch and no gap, so `alembic upgrade head` from `base`
+    reaches the whole schema in order.
     """
     script = _script_directory()
     assert [revision.revision for revision in script.walk_revisions()] == [
+        "0005_ads_data_origin_check",
+        "0004_ad_history",
         "0003_jobs_table",
         "0002_collection_domain",
         "0001_pg_trgm",
     ]
     assert script.get_base() == "0001_pg_trgm"
-    assert list(script.get_heads()) == ["0003_jobs_table"]
+    assert list(script.get_heads()) == ["0005_ads_data_origin_check"]
 
 
 def test_every_revision_is_reversible() -> None:

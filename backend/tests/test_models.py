@@ -40,6 +40,14 @@ S11_TABLES = frozenset(
 #: S1.2 adds the jobs table. This set is the cumulative S1 scope (S1.1 + S1.2).
 S1_TABLES = S11_TABLES | {"jobs"}
 
+#: Exactly the tables `models/__init__.py` assigns to S2.1. A literal for the
+#: same reason `S11_TABLES` is one: the boundary is the thing being tested, so it
+#: cannot be derived from the thing it bounds.
+S21_TABLES = frozenset({"ads", "ad_snapshots", "seen_in_run"})
+
+#: The cumulative S2 scope, which is everything that exists after S2.1.
+S2_TABLES = S1_TABLES | S21_TABLES
+
 S11_MODELS = (Competitor, FacebookPage, CollectionRun, ProviderRun, RawResponse)
 
 #: The explicit index names, and the access pattern each one exists for.

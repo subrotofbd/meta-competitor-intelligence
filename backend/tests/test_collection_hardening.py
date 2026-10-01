@@ -49,6 +49,7 @@ from app.services.collection import (
     INTERNAL_ERROR_MESSAGE,
     CollectionOrchestrator,
 )
+from tests.conftest import StubAd, StubResult
 
 NOW = datetime(2026, 10, 1, 12, 0, tzinfo=UTC)
 LONG_AGO = timedelta(hours=2)
@@ -1091,6 +1092,10 @@ class _FakeRun:
         object.__setattr__(self, "_session", session)
         object.__setattr__(self, "id", session.run_id)
         object.__setattr__(self, "country", "IN")
+        # Read before the orchestrator's first commit and handed to S2.1, whose
+        # ad identity is keyed on the provider that issued the ids.
+        object.__setattr__(self, "provider", "scripted")
+        object.__setattr__(self, "data_origin", DataOrigin.third_party)
         object.__setattr__(self, "status", CollectionRunStatus.PENDING)
         object.__setattr__(self, "started_at", None)
         object.__setattr__(self, "finished_at", None)
@@ -1128,6 +1133,16 @@ class _FakeSession:
             self.raw_payloads.append(instance.payload)
         elif isinstance(instance, ProviderRun):
             self.provider_run_count += 1
+
+    def execute(self, statement: Any, *args: Any, **kwargs: Any) -> Any:
+        """Accepts the S2.1 ad-history upserts and discards them.
+
+        A fake session that stored nothing has no ad to hand back, so each
+        upsert yields a fresh stand-in. These tests assert what the *walk*
+        decided -- which cursor, which ceiling, which status -- and the real
+        persistence is proved against PostgreSQL elsewhere.
+        """
+        return StubResult(StubAd(id=uuid.uuid4(), meta_ad_id="stub"))
 
     def flush(self) -> None:
         return None

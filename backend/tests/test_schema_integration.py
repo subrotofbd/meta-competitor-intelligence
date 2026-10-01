@@ -31,7 +31,7 @@ from alembic.autogenerate import compare_metadata
 from alembic.config import Config
 from alembic.migration import MigrationContext
 from alembic.script import ScriptDirectory
-from sqlalchemy import CheckConstraint, text
+from sqlalchemy import CheckConstraint, func, select, text
 from sqlalchemy.exc import DataError, IntegrityError
 from sqlalchemy.orm import Session
 
@@ -39,6 +39,8 @@ from sqlalchemy.orm import Session
 from app.db.base import Base
 from app.db.session import get_engine
 from app.models import (
+    Ad,
+    AdSnapshot,
     CollectionRun,
     CollectionRunStatus,
     Competitor,
@@ -47,18 +49,66 @@ from app.models import (
     ProviderRunStatus,
     RawResponse,
 )
+from app.providers.data.mock import MockBatch, MockPage, MockProvider
+from app.providers.data.models import PageRef
 from app.providers.data.provenance import DataOrigin
+from app.services import collection as collection_module
+from app.services.collection import CollectionOrchestrator
+from app.services.jobs import JobRequest
 from tests.conftest import REPO_ROOT
-from tests.test_models import S1_TABLES, S11_TABLES
+from tests.test_models import S1_TABLES, S11_TABLES, S21_TABLES
 
 pytestmark = pytest.mark.integration
 
 ALEMBIC_INI = REPO_ROOT / "alembic.ini"
 S11_REVISION = "0002_collection_domain"
 S12_REVISION = "0003_jobs_table"
+S21_REVISION = "0004_ad_history"
+S21_FIX_REVISION = "0005_ads_data_origin_check"
 BASE_REVISION = "0001_pg_trgm"
 
 NOW = datetime(2026, 9, 30, 9, 0, tzinfo=UTC)
+
+#: Page ids and payload for the two transaction-boundary tests. Two separate ids
+#: because `facebook_pages.page_id` is globally unique, so the control test could
+#: not reuse the same page as the failure test within one database.
+TRANSACTION_PAGE_ID = "100000000000090"
+TRANSACTION_CONTROL_ID = "100000000000091"
+TRANSACTION_PAYLOAD = {
+    "ads": [
+        {
+            "ad_id": "mock-ad-000901",
+            "page_id": TRANSACTION_PAGE_ID,
+            "status": "active",
+            "ad_creative_bodies": [{"body": "The only copy of this ad."}],
+        }
+    ]
+}
+
+
+class _RecordingQueue:
+    """A queue that does nothing, because collection does not enqueue.
+
+    The orchestrator's constructor requires a `JobQueue`, and this test is about
+    the transaction boundary rather than about the queue. A `None`-returning
+    fake would be enough, but naming the seam is clearer than a bare lambda and
+    keeps the type ignore honest.
+    """
+
+    def enqueue(self, job: JobRequest) -> str:
+        return "job-that-should-not-exist"
+
+    def get(self, kind: str, payload: dict[str, object]) -> object | None:
+        return None
+
+    def claim(self, **kwargs: object) -> object | None:
+        return None
+
+    def complete(self, job_id: str) -> None:
+        return None
+
+    def fail(self, job_id: str, error: str) -> None:
+        return None
 
 
 def _config() -> Config:
@@ -82,19 +132,113 @@ def test_the_migration_applies_and_leaves_one_head() -> None:
     assert len(ScriptDirectory.from_config(_config()).get_heads()) == 1
     with get_engine().connect() as connection:
         applied = connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-    assert applied == S12_REVISION
+    assert applied == S21_FIX_REVISION
 
 
-def test_s12_extends_the_s11_revision_rather_than_branching() -> None:
-    """One linear lineage. Two heads means no single `upgrade` reaches the schema."""
+def test_s21_extends_the_s12_revision_rather_than_branching() -> None:
+    """One linear lineage. Two heads means no single `upgrade` reaches the schema.
+
+    Five revisions rather than four: `0005` repairs a missing check that
+    `0004_ad_history` failed to install, and it extends the same chain rather than
+    branching from it. A repair that branched would leave two heads and no single
+    `upgrade` reaching the schema.
+    """
     script = ScriptDirectory.from_config(_config())
     revisions = {revision.revision: revision.down_revision for revision in script.walk_revisions()}
 
     assert revisions == {
+        S21_FIX_REVISION: S21_REVISION,
+        S21_REVISION: S12_REVISION,
         S12_REVISION: S11_REVISION,
         S11_REVISION: BASE_REVISION,
         BASE_REVISION: None,
     }
+
+
+def test_the_ads_data_origin_vocabulary_is_enforced_in_the_database(
+    db_session: Session,
+) -> None:
+    """The check `0004_ad_history` omitted, proven by trying to store a bad value.
+
+    `collection_runs.data_origin` has carried this vocabulary since S1.1. On
+    `ads` the column was a bare `VARCHAR`, so the same impossible value was
+    storable on the row a reader consults for provenance. Autogenerate cannot
+    catch that class of drift -- it does not detect `CHECK` constraints -- which
+    is why this is asserted by writing, not by reading the metadata.
+    """
+    # The bad value is `thirdparty`: eleven characters, so it fits the column's
+    # `VARCHAR(12)` and reaches the vocabulary check rather than being refused
+    # earlier for being too long. A longer nonsense string would raise a
+    # truncation error and pass this test for entirely the wrong reason.
+    #
+    # Raw SQL rather than the ORM: the `Enum` type validates in Python and would
+    # raise `LookupError` before ever reaching the database, which would prove only
+    # that the enum exists. The claim is that the *database* refuses the value --
+    # which is also how a hand-written or migrated writer would arrive at it.
+    with pytest.raises(IntegrityError) as caught:
+        db_session.execute(
+            text(
+                "INSERT INTO ads (id, provider, meta_ad_id, data_origin, "
+                "first_seen_at, last_seen_at) "
+                "VALUES (:id, 'mock', 'ad-bad-origin', 'thirdparty', :now, :now)"
+            ),
+            {"id": uuid.uuid4(), "now": NOW},
+        )
+
+    assert "ck_ads_data_origin" in str(caught.value)
+    db_session.rollback()
+
+
+def test_the_same_value_is_refused_on_collection_runs_as_on_ads(
+    db_session: Session,
+) -> None:
+    """Both tables enforce one vocabulary, proven on both.
+
+    S1.1 installed this check on `collection_runs` and S2.1's repair installed it
+    on `ads`. Two copies of the same fact enforcing different rules is the
+    divergence the provenance design exists to prevent, so the equivalence is
+    asserted rather than assumed -- the constraint name is the only thing that
+    differs between the two refusals.
+    """
+    competitor = _competitor(db_session)
+    page = _page(db_session, competitor, page_id="100000000000077")
+
+    with pytest.raises(IntegrityError) as caught:
+        db_session.execute(
+            text(
+                "INSERT INTO collection_runs (id, facebook_page_id, provider, country, "
+                "data_origin, status) "
+                "VALUES (:id, :page, 'mock', 'IN', 'thirdparty', 'pending')"
+            ),
+            {"id": uuid.uuid4(), "page": page.id},
+        )
+
+    assert "ck_collection_runs_data_origin" in str(caught.value)
+    db_session.rollback()
+
+
+def test_every_valid_origin_is_accepted_on_ads(db_session: Session) -> None:
+    """The negative control for the test above.
+
+    Without it, a constraint that rejected everything would satisfy the refusal
+    test. Each of the four declared values must round-trip, which is also the
+    check that a typo in the constraint's value list would be caught here rather
+    than by the first real collection run.
+    """
+    for index, origin in enumerate(DataOrigin):
+        row = Ad(
+            provider="mock",
+            meta_ad_id=f"ad-origin-{index}",
+            data_origin=origin,
+            first_seen_at=NOW,
+            last_seen_at=NOW,
+        )
+        db_session.add(row)
+        db_session.flush()
+        db_session.expire(row)
+        db_session.refresh(row)
+
+        assert row.data_origin is origin
 
 
 def test_pg_trgm_is_still_installed_after_s11() -> None:
@@ -116,6 +260,12 @@ def test_no_trigram_or_text_index_exists_yet() -> None:
 
     The only text `ARCHITECTURE.md` asks to search is ad copy, which is S2.1.
     Adding a GIN index now would be indexing a column that does not exist.
+
+    Unchanged by S2.1: `ad_snapshots.normalized` now exists and *does* hold ad
+    copy, but the query that would search it is S2.2's to write first, and an
+    index built before the query exists is how index overengineering starts. The
+    assertion is re-run here on purpose -- a checkpoint that adds a searchable
+    column is exactly the moment this guard could quietly stop applying.
     """
     with get_engine().connect() as connection:
         names = connection.execute(
@@ -162,6 +312,206 @@ def test_the_s12_downgrade_renders_complete_sql_without_executing_it() -> None:
     assert "DROP TABLE jobs" in sql
     # Indexes are dropped implicitly with the table, but we can verify
     assert "DROP INDEX ix_jobs_kind" in sql or "DROP TABLE jobs" in sql
+
+
+def test_the_s21_fix_downgrade_renders_complete_sql_without_executing_it() -> None:
+    """The repair revision's own downgrade, rendered offline.
+
+    The same rule as the other downgrades: rendered, never executed. Dropping the
+    check would leave `ads` with a weaker provenance rule than `collection_runs`,
+    so the statement is checked for reversibility and not run.
+    """
+    buffer = io.StringIO()
+    with redirect_stdout(buffer):
+        command.downgrade(_config(), f"{S21_FIX_REVISION}:{S21_REVISION}", sql=True)
+    sql = buffer.getvalue()
+
+    assert "ALTER TABLE ads DROP CONSTRAINT ck_ads_data_origin" in sql
+
+
+def test_the_s21_downgrade_renders_complete_sql_without_executing_it() -> None:
+    """Every S2.1 object dropped, in dependency order, rendered offline.
+
+    Same rule as the S1.1 downgrade test and for the same reason: the downgrade
+    has never been run, and it must not be. It issues `DROP`s, and dropping
+    `ad_snapshots` would destroy the only copy of observations the providers have
+    since stopped serving. Rendering offline proves the revision is reversible
+    without touching the database.
+
+    The order is the whole value of this test. `ads` and `ad_snapshots` reference
+    each other, so one of the two has to go first regardless; and the trigger has
+    to be removed before the function it calls, or the function is dropped while
+    a trigger still refers to it.
+    """
+    buffer = io.StringIO()
+    with redirect_stdout(buffer):
+        command.downgrade(_config(), f"{S21_REVISION}:{S12_REVISION}", sql=True)
+    sql = buffer.getvalue()
+
+    for name in sorted(S21_TABLES):
+        assert f"DROP TABLE {name}" in sql, f"downgrade does not drop {name}"
+
+    assert "DROP TRIGGER IF EXISTS trg_ad_snapshots_append_only ON ad_snapshots" in sql
+    assert "DROP FUNCTION IF EXISTS ad_snapshots_append_only()" in sql
+    # The trigger before the function it calls.
+    assert sql.index("DROP TRIGGER") < sql.index("DROP FUNCTION")
+    # The circular pair: one order only, and it must be the same in the SQL.
+    assert sql.index("DROP TABLE seen_in_run") < sql.index("DROP TABLE ad_snapshots")
+    assert sql.index("DROP TABLE ad_snapshots") < sql.index("DROP TABLE ads")
+
+
+def test_the_s21_append_only_trigger_and_its_function_are_installed() -> None:
+    """The guard is a real trigger on the real table, not only a convention.
+
+    The append-only rule is the one invariant in this project whose violation is
+    irrecoverable, and `AGENTS.md` section 8 states it. `test_ad_persistence.py`
+    proves the trigger *fires*; this proves it is *there*, so a migration that
+    silently stopped creating it would be a different failure from one that
+    created it wrongly.
+    """
+    with get_engine().connect() as connection:
+        triggers = connection.execute(
+            text(
+                "SELECT tgname, tgrelid::regclass::text FROM pg_trigger "
+                "WHERE NOT tgisinternal AND tgname = 'trg_ad_snapshots_append_only'"
+            )
+        ).all()
+        function_exists = connection.execute(
+            text("SELECT count(1) FROM pg_proc WHERE proname = 'ad_snapshots_append_only'")
+        ).scalar_one()
+
+    assert [row[1] for row in triggers] == ["ad_snapshots"]
+    assert function_exists == 1
+
+
+def test_the_s21_tables_exist_and_carry_their_expected_columns() -> None:
+    """The three tables, read from `information_schema` rather than the metadata.
+
+    `test_models.py` and `test_ads.py` read what the *code* declares. This reads
+    what the *database* has, which is a different question and the one a
+    migration bug would answer wrongly. `test_the_database_matches_the_models_with_no_drift`
+    compares the two, and this pins the concrete shape so a failure names the
+    table and the column.
+    """
+    expected = {
+        "ads": {
+            "id",
+            "created_at",
+            "updated_at",
+            "provider",
+            "meta_ad_id",
+            "data_origin",
+            "first_seen_at",
+            "last_seen_at",
+            "latest_snapshot_id",
+        },
+        "ad_snapshots": {
+            "id",
+            "created_at",
+            "updated_at",
+            "ad_id",
+            "collection_run_id",
+            "raw_ref",
+            "content_hash",
+            "ad_status",
+            "meta_delivery_start",
+            "normalized",
+        },
+        "seen_in_run": {
+            "id",
+            "created_at",
+            "updated_at",
+            "ad_id",
+            "collection_run_id",
+            "snapshot_id",
+        },
+    }
+
+    with get_engine().connect() as connection:
+        for table, columns in expected.items():
+            installed = {
+                str(row[0])
+                for row in connection.execute(
+                    text(
+                        "SELECT column_name FROM information_schema.columns "
+                        "WHERE table_name = :table"
+                    ),
+                    {"table": table},
+                )
+            }
+            assert installed == columns, table
+
+
+def test_the_s21_circular_foreign_key_is_installed_after_both_tables_exist() -> None:
+    """`ads.latest_snapshot_id` -> `ad_snapshots.id` is a real, immediate constraint.
+
+    The migration resolves the circular reference the ordinary way: create `ads`
+    with the column and no constraint, create `ad_snapshots`, then `ALTER TABLE`
+    to add the foreign key. That choice is load-bearing -- a `deferrable`
+    constraint would make the writer depend on constraint timing, and this asserts
+    the constraint is `NOT DEFERRABLE`, which is what lets `ad_persistence` insert
+    an ad with a NULL pointer, write the snapshot, and then fill the pointer in
+    without any deferral machinery.
+    """
+    with get_engine().connect() as connection:
+        row = connection.execute(
+            text(
+                "SELECT conname, condeferrable, confupdtype, confdeltype "
+                "FROM pg_constraint "
+                "WHERE conname = 'fk_ads_latest_snapshot_id'"
+            )
+        ).one()
+
+    assert row.condeferrable is False, "the constraint must be immediate"
+    # `a` = NO ACTION, `r` = RESTRICT. Both keep the ad from being orphaned.
+    assert row.confupdtype == "a"
+    assert row.confdeltype == "r"
+
+
+def test_every_declared_check_constraint_on_the_s21_tables_is_installed() -> None:
+    """The S2.1 checks exist in the database, compared by name.
+
+    The complement of `test_every_declared_check_constraint_exists_in_the_database`,
+    which covers the S1 tables and skips the S2.1 set because that loop is written
+    over `S1_TABLES`. The same class of bug applies: a `CHECK` declared inside
+    `mapped_column` is invisible to autogenerate, so it can exist in Python and
+    not in the database while Alembic reports no drift.
+
+    Every S2.1 table declares at least one, unlike `raw_responses`, whose
+    integrity comes entirely from `NOT NULL` and a `UNIQUE`.
+    """
+    with get_engine().connect() as connection:
+        rows = connection.execute(
+            text(
+                "SELECT relname AS table_name, conname AS constraint_name "
+                "FROM pg_constraint "
+                "JOIN pg_class ON pg_class.oid = conrelid "
+                "WHERE contype = 'c'"
+            )
+        ).all()
+
+    installed: dict[str, set[str]] = {}
+    for row in rows:
+        if str(row.constraint_name).startswith("ck_"):
+            installed.setdefault(str(row.table_name), set()).add(str(row.constraint_name))
+
+    # `seen_in_run` legitimately declares none, on the same grounds as
+    # `raw_responses`: it is a link row, so its integrity comes entirely from
+    # `NOT NULL` and a `UNIQUE`, and there is no shape rule about a value to
+    # enforce. Stated here rather than assumed, so a future reader does not read
+    # the absence as an oversight.
+    checkless = {"seen_in_run"}
+
+    for table_name in sorted(S21_TABLES):
+        declared = {
+            str(constraint.name)
+            for constraint in Base.metadata.tables[table_name].constraints
+            if isinstance(constraint, CheckConstraint)
+        }
+        if table_name not in checkless:
+            assert declared, f"{table_name} declares no checks, which cannot be right"
+        missing = declared - installed.get(table_name, set())
+        assert not missing, f"{table_name}: missing {sorted(missing)}"
 
 
 # ============================================================
@@ -383,6 +733,141 @@ def _full_chain(session: Session) -> tuple[Competitor, CollectionRun, ProviderRu
     call = _provider_run(session, run)
     session.flush()
     return competitor, run, call
+
+
+# ============================================================
+# The transaction boundary between evidence and its reading
+# ============================================================
+
+
+def test_a_failure_in_ad_history_leaves_the_committed_raw_response_intact(
+    db_session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The rollback is scoped to the normalised layer. This is what proves it.
+
+    `execute_collection_job` commits every raw response as it stores it, and only
+    then calls `persist_observations` in a separate transaction. So a failure in
+    the ad-history write rolls back the *reading* and must leave the *evidence*
+    alone -- the evidence being the only copy of anything about an ad that has
+    since stopped running (`DATA_ACCESS.md`).
+
+    The failure is injected by replacing the module-level `persist_observations`
+    the orchestrator calls, so the real code path runs: the real fetch, the real
+    raw write, the real commit, the real normalisation, the real
+    `_persist_ad_history` with its real `except: rollback()`. A test that called
+    the persistence service directly would prove only the service.
+
+    Three things are asserted, and the third is the one that would fail if the
+    rollback were not scoped:
+
+    1. the run is recorded as failed, so the failure is not silent;
+    2. the `raw_responses` row exists, with the whole payload including the
+       record the normalizer read;
+    3. its `payload_hash` is present and readable.
+
+    On (3): `payload_hash` is written by a trigger, not a `DEFAULT`, so it is
+    absent from the `INSERT`'s `RETURNING` and the ORM attribute stays `None`
+    after a flush even when the row is correct. This reads it with `refresh`,
+    which is what makes the assertion about the *stored* value rather than about
+    a trigger's timing.
+    """
+    page = _page(db_session, _competitor(db_session), page_id=TRANSACTION_PAGE_ID)
+    # Both timestamps start null, because the orchestrator writes them from the
+    # real clock and the row carries `CHECK (finished_at >= started_at)`. The
+    # file-wide `NOW` is a fixed 2026-09-30 constant, which is fine for rows no
+    # test ever runs but not for a run the orchestrator will start and finish --
+    # a pending run legitimately has neither timestamp, and leaving `finished_at`
+    # at the file default would put it before the real `started_at`.
+    run = _collection_run(
+        db_session,
+        page,
+        status=CollectionRunStatus.PENDING,
+        started_at=None,
+        finished_at=None,
+    )
+
+    provider = MockProvider(
+        {
+            TRANSACTION_PAGE_ID: MockPage(
+                page=PageRef(provider_page_id=TRANSACTION_PAGE_ID, page_name="Acme India"),
+                batches=(MockBatch(raw=TRANSACTION_PAYLOAD),),
+            )
+        },
+        clock=lambda: NOW,
+    )
+
+    def _fail(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("ad history could not be written")
+
+    monkeypatch.setattr(collection_module, "persist_observations", _fail)
+
+    outcome = CollectionOrchestrator(
+        db_session,
+        provider,
+        _RecordingQueue(),  # type: ignore[arg-type]
+    ).execute_collection_job(run.id)
+
+    # 1. The failure is recorded rather than swallowed.
+    assert outcome.status is CollectionRunStatus.FAILED
+    assert outcome.stopped_reason is None
+
+    # 2. The evidence survived, whole.
+    stored = db_session.execute(select(RawResponse)).scalar_one()
+    assert stored.payload == TRANSACTION_PAYLOAD
+    assert len(stored.payload["ads"]) == 1
+
+    # 3. And the trigger-written hash is still readable on the surviving row.
+    db_session.refresh(stored)
+    assert stored.payload_hash is not None
+    assert len(stored.payload_hash) == 64
+
+    # And nothing was written by the failed layer, so this is a clean rollback
+    # rather than a partial write that happened not to touch the ad tables.
+    assert db_session.execute(select(func.count()).select_from(Ad)).scalar_one() == 0
+
+
+def test_the_same_failure_without_the_persistence_layer_writes_no_ad(
+    db_session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The negative control for the test above.
+
+    Without it, the control above would pass even if the orchestrator never called
+    `persist_observations` at all -- a regression that stopped persisting ads
+    entirely would satisfy every assertion in it. Here the layer is *not*
+    replaced, so the run completes normally and the same rows appear; the only
+    difference between the two tests is whether the persistence layer ran, which
+    is what makes the first one's absence of ad rows meaningful.
+    """
+    page = _page(db_session, _competitor(db_session), page_id=TRANSACTION_CONTROL_ID)
+    # Both timestamps null for the same reason as in the failure test above.
+    run = _collection_run(
+        db_session,
+        page,
+        status=CollectionRunStatus.PENDING,
+        started_at=None,
+        finished_at=None,
+    )
+
+    provider = MockProvider(
+        {
+            TRANSACTION_CONTROL_ID: MockPage(
+                page=PageRef(provider_page_id=TRANSACTION_CONTROL_ID, page_name="Acme India"),
+                batches=(MockBatch(raw=TRANSACTION_PAYLOAD),),
+            )
+        },
+        clock=lambda: NOW,
+    )
+
+    outcome = CollectionOrchestrator(
+        db_session,
+        provider,
+        _RecordingQueue(),  # type: ignore[arg-type]
+    ).execute_collection_job(run.id)
+
+    assert outcome.status is not CollectionRunStatus.FAILED
+    assert db_session.execute(select(func.count()).select_from(Ad)).scalar_one() == 1
+    assert db_session.execute(select(func.count()).select_from(AdSnapshot)).scalar_one() == 1
+    assert db_session.execute(select(func.count()).select_from(RawResponse)).scalar_one() == 1
 
 
 # ============================================================

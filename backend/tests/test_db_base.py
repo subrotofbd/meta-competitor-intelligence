@@ -18,18 +18,18 @@ from app.db.base import Base
 pytestmark = pytest.mark.unit
 
 
-def test_the_metadata_holds_exactly_the_s1_tables() -> None:
-    """The base is the single registry every table joins, and it holds S1.1 + S1.2.
+def test_the_metadata_holds_exactly_the_s2_tables() -> None:
+    """The base is the single registry every table joins, and it holds S1 + S2.1.
 
-    S0.2 asserted this metadata was empty. S1.1 added 5 tables. S1.2 adds the
-    jobs table. The cumulative S1 scope is 6 tables. This test asserts the
-    cumulative scope while the S1.1 boundary test in test_models.py asserts
-    the S1.1 assignment specifically.
+    S0.2 asserted this metadata was empty. S1.1 added 5 tables, S1.2 the jobs
+    table, and S2.1 the three ad-history tables. The cumulative scope is 9. This
+    test asserts the cumulative scope while the per-checkpoint boundary tests in
+    test_models.py assert the assignments specifically.
     """
-    from tests.test_models import S1_TABLES
+    from tests.test_models import S2_TABLES
 
-    assert set(Base.metadata.tables) == S1_TABLES
-    assert Base.metadata.naming_convention, "the naming convention must survive S1.2"
+    assert set(Base.metadata.tables) == S2_TABLES
+    assert Base.metadata.naming_convention, "the naming convention must survive S2.1"
 
 
 def test_convention_covers_every_constraint_kind() -> None:

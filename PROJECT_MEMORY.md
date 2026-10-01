@@ -1034,3 +1034,277 @@ Normalized ad persistence plus the historical ad/snapshot domain: the `ads` and 
 tables, append-only `ad_snapshots`, the `provider_active` / `not_seen_since` / `presumed_inactive`
 state machine, and consuming `CollectionOutcome` -- whose `stopped_reason` now tells S2.1 why a
 run was short. Do not start without explicit human approval.
+
+---
+
+## S2.1 -- IMPLEMENTATION PAUSED -- HANDOFF
+
+**S2.1 IS NOT COMPLETE.** The work is paused mid-checkpoint, deliberately, with everything left on
+disk. Nothing in this entry may be read as a pass. This is a documentation-only handoff: no
+application code, schema, migration, test, or model was touched to produce it, and **nothing was
+committed**.
+
+### 1. Last committed checkpoint
+```
+6b09e5e -- fix: harden collection orchestration
+```
+`6b09e5e` remains HEAD and is intact. It was the clean state before this attempt and it was not
+altered, reverted, or rebased. The stash list is empty.
+
+### 2. Current uncommitted S2.1 state
+All of the following exist on disk, are **uncommitted**, and are new work layered on `6b09e5e`:
+
+| Item | Location |
+|---|---|
+| `ads` model/table created | `backend/app/models/ads.py` (`Ad`) |
+| `ad_snapshots` model/table created | `backend/app/models/ads.py` (`AdSnapshot`) |
+| `seen_in_run` model/table created | `backend/app/models/ads.py` (`SeenInRun`) |
+| `content_hash` v1 implemented | `backend/app/services/content_hash.py` |
+| ad persistence service created | `backend/app/services/ad_persistence.py` |
+| `CollectionOrchestrator` modified for S2.1 persistence | `backend/app/services/collection.py` |
+| migration created **and applied** | `database/migrations/versions/0004_ad_history.py` |
+
+Working tree: **9 modified, 4 untracked, 0 staged.** The four untracked files are the ones above
+that are new; the modified files are `models/__init__.py`, `services/collection.py`, and six test
+files touched only to keep the existing fakes and cumulative table-count assertions compatible with
+the new tables. `AGENTS.md`, `ARCHITECTURE.md`, `DATA_ACCESS.md`, `IMPLEMENTATION_PLAN.md` were **not**
+modified.
+
+### 3. Current database state
+- **Alembic head: `0004_ad_history`. Single head, no branch, no gap** (`0001_pg_trgm` ->
+  `0002_collection_domain` -> `0003_jobs_table` -> `0004_ad_history`).
+- `alembic current` reports `0004_ad_history`; `alembic check` reported **"No new upgrade operations
+  detected"** -- migration and models are in agreement.
+- **No database reset was performed. No destructive downgrade was performed.** The existing data was
+  not touched. `0004_ad_history.upgrade()` is purely additive (`CREATE TABLE`, `CREATE TRIGGER`,
+  `CREATE OR REPLACE FUNCTION`, `ALTER TABLE ADD CONSTRAINT`); its `downgrade()` contains `DROP`
+  statements but is documented as offline-render only and **was never executed**.
+- Tables present: `ads`, `ad_snapshots`, `seen_in_run`, alongside the S1 set. All FKs on the three
+  new tables are `RESTRICT`; no cascade anywhere. `trg_ad_snapshots_append_only` is installed.
+- **The three new S2.1 tables are empty**: `ads` 0, `ad_snapshots` 0, `seen_in_run` 0.
+  `raw_responses` 0 and `collection_runs` 0 as well. (`jobs` holds 2 rows, pre-existing from S1.2
+  work.) So no S2.1 row has been written by the paused implementation.
+
+### 4. Current verification status
+What was observed and is therefore trustworthy:
+- `ruff check backend` -- All checks passed. `ruff format --check` -- 59 files already formatted.
+- `mypy` under the project config (`packages = ["app"]`, `strict = true`) -- **no issues in 35 source
+  files**. The new code type-checks clean.
+- `pytest -m unit` -- **139 passed**. `pytest -m "not integration"` -- **407 passed, 115 deselected**.
+- `alembic check` -- no drift.
+- All changed and new files parse.
+
+What is **not** verified, and must not be described as verified:
+- **S2.1-specific test coverage is NOT COMPLETE.** There is no `test_content_hash.py`, no
+  `test_ads.py`, and no `test_ad_persistence.py`. A search for `persist_observations`,
+  `content_hash_v1`, `AdSnapshot` and `SeenInRun` across `backend/tests/` returns **zero** matches.
+- **Integration verification for the three new S2.1 tables is NOT COMPLETE.** The 115 integration
+  tests were deselected and not run. The append-only trigger, the circular
+  `ads` <-> `ad_snapshots` foreign key, the upsert path, and the uniqueness constraints have no
+  integration coverage.
+- The boundary pattern used by S1.1 was not mirrored. `test_models.py` gained `S21_TABLES` and
+  `S2_TABLES` constants, but **no test consumes `S21_TABLES`**, so the S2.1 checkpoint boundary is
+  currently unasserted.
+- **S2.1 is therefore NOT COMPLETE** and must not be reported as complete.
+
+### 5. Exact remaining work, in this order
+- **a.** `backend/tests/test_content_hash.py` -- v1 digest stability, the frozen version token,
+  absences staying distinct (`None` vs `""` vs `()`), byte-length framing, set-like fields sorted
+  for hashing only, provider reordering not minting a false change.
+- **b.** `backend/tests/test_ads.py` -- including the missing **S2.1 boundary test that consumes
+  `S21_TABLES`**, mirroring `test_s11_defines_exactly_the_five_assigned_tables`, plus the rule that
+  `ad_snapshots.updated_at` never moves.
+- **c.** `backend/tests/test_ad_persistence.py` -- first sighting writes a snapshot; an unchanged
+  re-sighting writes only a link and does not move `latest_snapshot_id`; changed content appends;
+  duplicate sightings within a run collapse to one; reprocessing the same run is idempotent.
+- **d.** Integration coverage in `backend/tests/test_schema_integration.py` for the three new tables:
+  the append-only trigger refusing `UPDATE`/`DELETE`, the circular FK, `RESTRICT` behaviour, and the
+  uniqueness constraints.
+- **e.** Raw evidence preservation verification -- prove the raw response survives a failure in the
+  normalised persistence step, i.e. that `_persist_ad_history`'s rollback cannot take a committed
+  payload with it.
+- **f.** Full validation -- lint, format, strict mypy, and the complete suite **including integration**
+  against the applied `0004_ad_history`.
+- **g.** Security / code-quality / data-loss review (the three reviews every checkpoint runs).
+- **h.** The `PROJECT_MEMORY.md` completion entry for S2.1, following AGENTS.md section 4.
+- **i.** The final S2.1 commit.
+
+### 6. Architectural decisions already locked in the uncommitted work
+These are settled. Do not relitigate them in the next session without an explicit human decision:
+- The S2.1 tables are exactly `ads`, `ad_snapshots`, `seen_in_run`.
+- `seen_in_run` carries `UNIQUE (ad_id, collection_run_id)`.
+- `seen_in_run` is **upserted, not append-only** -- it is a link row, and a provider may legitimately
+  serve one ad twice in one walk.
+- `ad_snapshots` is **append-only**, enforced by the database (`trg_ad_snapshots_append_only`), not
+  only by application discipline. A new observation is a new row.
+- `content_hash` v1 is **frozen and versioned** (`CONTENT_HASH_VERSION = "s2.1-content-v1"`). A
+  different input set is a new *version*; no v1 row is ever recomputed.
+- `copy_hash` and `creative_hash` are **deferred to S2.2**, added later as new columns.
+- `ads.current_status` and the `provider_active` / `not_seen_since` / `presumed_inactive` state
+  machine are **deferred to S2.3**. Nothing in S2.1 derives an ad's status.
+- `ad_snapshots.raw_ref` points at `raw_responses.id`, giving the chain
+  snapshot -> response -> provider call -> run -> page -> competitor.
+- `EvidenceClass` remains **derived** from `DataOrigin`, never physically stored. No table in the
+  package carries the column.
+- The raw response must remain **persisted and committed before normalization**, unconditionally, on
+  every iteration of the cursor loop. The S2.1 normalised write is a separate transaction after it.
+- `meta_delivery_start` (provider-reported) and `ads.first_seen_at` (our observation) are separate
+  fields and are never merged.
+
+### 7. Critical unfinished verification -- read this before claiming anything about S2.1
+**The real S2.1 persistence implementation has no dedicated test coverage at all.** There is no
+`test_content_hash.py`, no `test_ads.py`, no `test_ad_persistence.py`. The existing fake sessions in
+`test_collection_hardening.py`, `test_collection_ordering.py` and `conftest.py` (`StubAd`,
+`StubResult`, and the added `execute` methods) were adjusted **only for compatibility** -- they
+accept the new upsert statements and **discard** them, returning fresh stand-ins. They prove that
+the walk still decides what it decided; they prove nothing about what is stored.
+
+Several docstrings in the new code promise tests that do not yet exist, notably
+`backend/app/models/ads.py` ("A test asserts it does not [move `updated_at`]"),
+`backend/app/services/ad_persistence.py` ("Idempotent: re-processing the same run leaves the same
+rows"), and `database/migrations/versions/0004_ad_history.py` (append-only enforcement). Treat those
+as declared intent, not as satisfied requirements, until item (b), (c) and (d) above are done and run.
+
+**Do NOT describe the S2.1 implementation as fully verified.** It is uncommitted, unverified in
+substance, and unfinished.
+
+### 8. Next session instruction
+**Resume S2.1 from the existing uncommitted state.**
+- **Do NOT rebuild S2.1 from scratch.** The models, migration, `content_hash` v1, the persistence
+  service and the orchestrator wiring are all present and coherent; the work that remains is the
+  missing test coverage and the final review and commit.
+- **Do NOT reset the database, run a downgrade, drop a table, or re-run the migration.** `0004_ad_history`
+  is applied and is the one thing in this checkpoint that cannot be undone cleanly.
+- **Do NOT start S2.2.** No `ad_creatives`, no `ad_platforms`, no `ad_countries`, no `landing_pages`,
+  no `media_assets`.
+- First write and run the missing focused tests (`a`, `b`, `c`), then the integration tests (`d`),
+  then raw-evidence verification (`e`), then full validation (`f`), then the three reviews (`g`),
+  then the `PROJECT_MEMORY.md` completion entry (`h`), then the S2.1 commit (`i`).
+- Do not start any later checkpoint without explicit human approval.
+
+---
+
+## 2026-10-01, Checkpoint S2.1 -- Normalized Ad Persistence + Ad History Domain (COMPLETE)
+
+Resumes the paused work recorded in the entry above, which is left in place as the record of
+where the checkpoint stood when it was interrupted. **S2.1 is complete and READY TO COMMIT.**
+**S2.2 has NOT started.**
+
+### 1. What was built
+
+Three tables, one digest, one write path, and the orchestrator wiring that orders them.
+
+- **`ads`** (`backend/app/models/ads.py`) -- one ad, identified for ever as
+  `(provider, meta_ad_id)`. Carries `first_seen_at` / `last_seen_at` (ours, server-clock),
+  `data_origin`, and a nullable `latest_snapshot_id` pointer. **No `current_status`** (S2.3),
+  no `copy_hash` / `creative_hash` (S2.2), and **no page or competitor column** -- lineage runs
+  `seen_in_run` -> `collection_run` -> `facebook_page` -> `competitor`.
+- **`ad_snapshots`** -- one immutable observation. `raw_ref` -> `raw_responses.id` is the whole
+  audit trail. **Append-only, enforced by the database** (`trg_ad_snapshots_append_only`), not by
+  application discipline, because a silent write here is irrecoverable.
+- **`seen_in_run`** -- the fact that one run saw one ad. `UNIQUE (ad_id, collection_run_id)`.
+  **Not append-only**: it is a link row, and a provider may legitimately serve one ad twice in
+  one walk, so the second sighting corrects the link rather than adding a row.
+- **`content_hash` v1** (`backend/app/services/content_hash.py`) -- frozen and versioned
+  (`s2.1-content-v1`), eight inputs, length-prefixed framing, exclusions pinned, no Unicode
+  normalisation, a frozen display-format token table so widening `AdFormat` cannot move a stored
+  digest.
+- **`ad_persistence`** (`backend/app/services/ad_persistence.py`) -- identity upsert, digest
+  compare, snapshot only on change, pointer only on new snapshot, link upsert.
+- **`CollectionOrchestrator`** -- the normalised write happens **after** every raw response is
+  committed, in its own transaction, with its own rollback.
+
+### 2. Migrations
+
+- **`0004_ad_history`** -- creates the three tables, adds the circular
+  `ads` -> `ad_snapshots` foreign key with `ALTER TABLE` after both exist, and installs the
+  append-only trigger. All-RESTRICT throughout. Downgrade renders offline and is never run.
+- **`0005_ads_data_origin_check`** -- an **additive repair** found by the final review, not new
+  scope. `0004` created `ads.data_origin` with `create_constraint=False`, so the vocabulary check
+  the model declares was never installed: `collection_runs.data_origin` rejected out-of-vocabulary
+  values (S1.1) while `ads.data_origin` accepted anything. **`alembic check` reported no drift and
+  still does** -- autogenerate does not detect `CHECK` constraints, which `app/models/mixins.py`
+  documents at length. The only way to catch it is comparing metadata against `pg_constraint` by
+  name, and the existing test looped over `S1_TABLES` only. One `CHECK`, same four values, no
+  data touched. `0004` was not edited, because editing an applied migration would be a lie about
+  what actually ran.
+
+Head is `0005_ads_data_origin_check`, single head, no drift. The three S2.1 tables are **empty**;
+no reset, no destructive downgrade, no data touched at any point.
+
+### 3. Verification
+
+| Check | Result |
+|---|---|
+| Targeted four files | **215 passed** |
+| Full backend suite | **675 passed** |
+| `ruff check backend` | All checks passed |
+| `ruff format --check backend` | 62 files already formatted |
+| `mypy` (project config, `packages = ["app"]`, strict) | Success, 35 source files |
+| `mypy backend` (adds tests) | 61 errors in 15 files -- the exact pre-existing baseline; **zero** in any S2.1 file |
+
+**Mutation-verified.** Three deliberate regressions were each caught: inverting the digest
+comparison in `_persist_one` fails `test_reprocessing_a_run_with_changed_content_is_refused`;
+removing the commit that protects the raw response fails
+`test_a_failure_in_ad_history_leaves_the_committed_raw_response_intact`; removing `S21_TABLES` from
+`test_the_database_matches_the_models_with_no_drift`'s reach fails the metadata assertions.
+Six further test bugs of my own were found and fixed during this work (a wrong `_frame("")`
+expectation, `local_remote_pairs` indexing, a blanket FK loop that contradicted the intentional
+`latest_snapshot_id`, a colliding `page_id`, two orphan-FK tests that could pass for the wrong
+constraint, and a `seen_in_run` test asserting a scenario the design forbids).
+
+### 4. Idempotence -- corrected wording, and what is actually guaranteed
+
+The docstring previously claimed flatly that reprocessing "leaves the same rows". That was
+**overstated**. The corrected docstring states the guarantee conditionally:
+
+- **Reprocessing the same run with *identical* input is idempotent.** Three separate mechanisms:
+  identity is an upsert, an unchanged digest writes no snapshot and does not move
+  `latest_snapshot_id`, and the `seen_in_run` link is an upsert.
+- **Reprocessing the same run with *changed* content is NOT idempotent, and the database refuses
+  it.** `uq_ad_snapshots_ad_run` rejects the second snapshot with an `IntegrityError`.
+
+**That rejection is intentional and is now a tested invariant.** One collection run is one
+observation of an ad, so `(ad, run)` *is* the identity of that observation and admits exactly one
+row. A run yielding two different readings is two observations wearing one run's identity, and the
+honest record is a new run. Allowing it would let per-run history become a record of a *reading*
+rather than of a *walk*, and would break S2.3's `not_seen_since` reasoning, which counts
+*consecutive complete runs* and is only meaningful if one run contributes one observation per ad.
+
+Re-processing exists to fix a parser bug, and a fixed parser reads the same stored bytes to the
+same digest -- so the refused path is not reached by the use case idempotence was introduced for.
+It is reached when the *reader* changed, which is exactly the case worth refusing loudly rather
+than silently recording as history. **No behaviour changed; only the claim was corrected.**
+
+### 5. Known limitations
+
+- **Changed-input reprocessing raises `IntegrityError`** rather than being absorbed. Correct, and
+  now pinned by a test, but a caller must treat it as "a new run is required", not as a retryable
+  error.
+- **The `seen_in_run` `on_conflict_do_update` `SET` clause is never exercised**, because the
+  per-run sighting collapse happens before the write. It is unreachable through the public API, so
+  it is effectively dead code today. Noted rather than tested, because contorting a test to reach
+  it would assert behaviour the design prevents.
+- **`seen_in_run.updated_at` is the only signal that a link was corrected**, and nothing consumes
+  it yet.
+- **Windows `TEMP`/`TMP`: 11 pre-existing `PermissionError` errors** in
+  `backend/tests/test_media_store.py` and `backend/tests/test_offline_guard.py` under the default
+  `C:\Users\DELL\AppData\Local\Temp\pytest-of-DELL`. **This is an environment issue in `tmp_path`
+  resolution, not an S2.1 defect**, and the affected tests are S0.3 work that must not be modified
+  to hide it. The suite is green with `TEMP`/`TMP` pointed at
+  `C:\Users\DELL\AppData\Local\Temp\opencode`. **Anyone running the suite on this machine must set
+  those two variables or expect those 11 errors** -- they are not test failures.
+- **Integration tests require the PostgreSQL container.** They are not skipped when it is down.
+- **No real provider exists.** Every collection has run against `MockProvider` and the committed
+  corpus. Nothing here has met Meta or a third party.
+- **No API, no auth, no frontend.** S2.1 is storage and the write path only.
+
+### 6. Next checkpoint: S2.2 -- NOT STARTED
+
+No `ad_creatives`, no `ad_platforms`, no `ad_countries`, no `landing_pages`, no `media_assets`, no
+copy/creative hash split, no URL canonicalisation, no search index. The `pg_trgm` extension is
+installed and deliberately unused; the S2.1 tables declare no indexes beyond their constraints,
+and `test_no_trigram_or_text_index_exists_yet` was **re-run and extended** in this checkpoint
+precisely so a later one cannot add one without noticing. `copy_hash` and `creative_hash` arrive
+as new columns, and the stored v1 `content_hash` values keep meaning exactly what they meant.
+Do not start without explicit human approval.

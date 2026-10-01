@@ -42,6 +42,7 @@ from app.providers.data.normalize import (
     NormalizationErrorKind,
     normalize_payload,
 )
+from app.providers.data.provenance import DataOrigin
 from app.services import collection as collection_module
 from app.services.collection import (
     ERROR_MESSAGE_LIMIT,
@@ -49,6 +50,7 @@ from app.services.collection import (
     _describe,
     _excerpt,
 )
+from tests.conftest import StubAd, StubResult
 
 PAGE_ID = "100000000000031"
 COUNTRY = "IN"
@@ -130,6 +132,16 @@ class _RecordingSession:
     def add(self, instance: Any) -> None:
         self.trace.append(f"add:{type(instance).__name__}")
 
+    def execute(self, statement: Any, *args: Any, **kwargs: Any) -> Any:
+        """Accepts the S2.1 ad-history upserts and discards them.
+
+        Recorded in the trace so a test can see they happened, but the rows go
+        nowhere: this session is a trace, not a database, and the real
+        persistence is proved against PostgreSQL in the S2.1 integration tests.
+        """
+        self.trace.append("execute")
+        return StubResult(StubAd(id=uuid.uuid4(), meta_ad_id="stub"))
+
     def flush(self) -> None:
         self.trace.append("flush")
 
@@ -144,6 +156,10 @@ def _fake_run() -> Any:
     return SimpleNamespace(
         id=uuid.uuid4(),
         country=COUNTRY,
+        # Read before the orchestrator's first commit and handed to S2.1, whose
+        # ad identity is keyed on the provider that issued the ids.
+        provider="scripted",
+        data_origin=DataOrigin.third_party,
         status=CollectionRunStatus.PENDING,
         started_at=None,
         finished_at=None,
