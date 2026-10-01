@@ -1662,7 +1662,9 @@ contain its own hash, so it is recorded here in this follow-up commit, as at S0.
 
 **Git state correction:** an earlier section records "no remote". That is no longer true -- an
 `origin` remote (`subrotofbd/meta-competitor-intelligence`) is now configured, and S2.3 already sits
-on `origin/main`. **S2.4 is committed locally and NOT pushed.**
+on `origin/main`. **S2.4 is complete and pushed** -- `ff7ba7d` and its three follow-ups
+(`0fa5736`, `47ec45e`, `40af781`) are all on `origin/main`, whose head is `40af781`.
+**S3.1 is the unpushed work:** committed locally, not yet on `origin/main`.
 
 **`media_assets`** -- `(provider, provider_key)` unique, `source_url`, `mime`, `width`, `height`,
 `duration_seconds NUMERIC`, `storage_key`, `byte_size`, `first_seen_at`, `last_seen_at`.
