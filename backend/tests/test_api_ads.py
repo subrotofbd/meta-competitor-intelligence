@@ -596,11 +596,19 @@ def test_decimal_media_durations_are_not_floated() -> None:
 # ============================================================
 
 
-def test_exactly_the_four_s32_routes_are_registered() -> None:
+def test_the_s32_ad_routes_are_registered() -> None:
+    """The four S3.2 routes, plus `/competitors` added by S3.3 step 1.
+
+    Pinned as a whole rather than one link per route, so a route that appears or
+    disappears cannot go unnoticed. The fifth path is the competitor directory: the
+    names behind these filters' UUID parameters, added because nothing before it
+    could turn a `competitor_id` into a human-readable choice.
+    """
     assert sorted(create_app(app_env=AppEnv.LOCAL).openapi()["paths"]) == [
         "/ads",
         "/ads/{ad_id}",
         "/ads/{ad_id}/snapshots",
+        "/competitors",
         "/exports/ads.csv",
     ]
 

@@ -240,14 +240,31 @@ translations to trust. English summaries, if ever wanted, arrive as a **new `ana
 schema** -- never as columns bolted onto v1.
 
 ## API surface (slice 1)
-Planned for the whole slice: `/auth/*`, `/competitors`, `/competitors/{id}/pages`, `/collections` (start run, list runs,
-run detail), `/ads`, `/ads/{id}` (+ `/snapshots`, `/media/{asset_id}`), `/ads/{id}/analyze`, `/exports/ads.csv`,
-`/healthz`.
+Planned for the whole slice: `/auth/*`, `/competitors/{id}/pages`, `/collections` (start run, list runs,
+run detail), `/ads/{id}/media/{asset_id}`, `/ads/{id}/analyze`, `/healthz`.
 
-**Shipped so far (S3.2):** `GET /ads`, `GET /ads/{id}`, `GET /ads/{id}/snapshots`, `GET /exports/ads.csv`. Nothing
-else exists yet. In particular `/ads/{id}/analyze` is deliberately **absent** -- analysis is triggered by the collection
-pipeline, never by a page view -- and `/ads/{id}/media/{asset_id}` cannot exist until a byte-acquisition phase
-approves storing and serving media bytes.
+**Shipped so far:** `GET /ads`, `GET /ads/{id}`, `GET /ads/{id}/snapshots`, `GET /exports/ads.csv` (S3.2), and
+`GET /competitors` (S3.3 step 1). Nothing else exists yet. In particular `/ads/{id}/analyze` is deliberately
+**absent** -- analysis is triggered by the collection pipeline, never by a page view -- and
+`/ads/{id}/media/{asset_id}` cannot exist until a byte-acquisition phase approves storing and serving media bytes.
+
+**`GET /competitors`** returns every competitor with its Facebook Pages nested:
+
+```
+CompetitorListOut { items: CompetitorOut[] }
+CompetitorOut     { id, name, created_at, pages: FacebookPageOut[] }
+FacebookPageOut   { id, page_id, name|null, url|null, country, is_tracked, tracking_frequency, created_at }
+```
+
+A competitor's `id` is what `/ads?competitor_id=` takes and a page's `id` is what `/ads?facebook_page_id=` takes --
+the same UUIDs, with no translation layer, which is what makes the endpoint worth having at all. Ordering is
+`name ASC, id ASC` with nested pages `name ASC NULLS LAST, id ASC`; the `id` tie-break matters because
+`competitors.name` is deliberately **not unique**. Pages carry **no** `data_origin` or `evidence_class`: neither is
+collected data (`models/tracking.py`), so stamping provenance on the operator's own tracking list would be a lie.
+Pages the operator stopped tracking are still returned with `is_tracked: false` -- `ad_snapshots` is append-only
+with `RESTRICT` foreign keys, so hiding them would hide real history behind a soft delete the schema does not have.
+No ad or collection-run counts are exposed: a count next to a competitor name invites reading it as performance, which
+this product cannot measure. No migration: both tables and `ix_facebook_pages_competitor_id` already exist.
 
 `/ads` filters, all optional: `provider`, `competitor_id`, `country`, `facebook_page_id`, `current_status`,
 `provider_active`, `data_origin`, `first_seen_from`/`first_seen_to`, `last_seen_from`/`last_seen_to`, `q`. Ordering is

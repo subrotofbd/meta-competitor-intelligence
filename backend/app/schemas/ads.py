@@ -42,16 +42,11 @@ import uuid
 from datetime import datetime
 from decimal import Decimal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import Field
 
 from app.providers.data.provenance import DataOrigin, EvidenceClass
+from app.schemas.base import _Response
 from app.services.ad_duration import DurationBucket, DurationSource
-
-
-class _Response(BaseModel):
-    """Frozen and closed: an unexpected field in a response is a bug, not a feature."""
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
 
 
 class DurationOut(_Response):

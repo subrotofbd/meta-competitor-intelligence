@@ -2331,3 +2331,118 @@ exercised -- only index *matching*; no relevance ranking, only deterministic `la
 combined context filters are independent `EXISTS` clauses, so `competitor_id` + `country` + `current_status` can be
 satisfied by different contexts of one ad; `direction` invalid yields 422 while `sort` invalid yields 400;
 `MediaReferenceOut.bytes_available` is a hard-coded `false`; no `/healthz`; no authentication, by design.
+
+---
+
+## 2026-10-02, S3.3 step 1 -- competitors directory API
+
+First step of S3.3. **Backend only**: one read-only endpoint, added because S3.3
+discovery found the frontend had no way to name a competitor. Everything else S3.3
+needs -- the seed script, the AI fixture re-keying, the frontend itself, and the
+full documentation reconciliation -- is **not started**.
+
+**Decision applied.** Option (a) from the discovery: a nested competitor directory,
+rather than denormalising names into `/ads`. No denormalisation, so `/ads` keeps the
+lean, non-joining shape S3.2 shipped, and one endpoint answers "which brands, which
+Pages" instead of three lookups.
+
+**`GET /competitors`** -- `CompetitorListOut { items }`, `CompetitorOut { id, name,
+created_at, pages }`, `FacebookPageOut { id, page_id, name|null, url|null, country,
+is_tracked, tracking_frequency, created_at }`. All three `extra="forbid"`.
+
+- **No migration.** `competitors` and `facebook_pages` exist since S1.1, and
+  `ix_facebook_pages_competitor_id` already exists with a comment saying it serves
+  `/competitors/{id}/pages` -- the index was built for an endpoint that was never
+  written. `alembic check` still reports no drift and a single head.
+- **No provenance fields.** `models/tracking.py` is explicit that neither a
+  competitor nor a Page is collected data, so neither carries `data_origin` or
+  `evidence_class`. Stamping `PROVIDER_DATA` on a Page would also imply the
+  operator's own tracking list is third-party data. Pinned by
+  `test_no_provenance_field_is_exposed`.
+- **Untracked Pages are returned**, with `is_tracked: false`. `ad_snapshots` is
+  append-only with `RESTRICT` FKs, so hiding a Page would hide real history behind a
+  soft delete the schema does not have.
+- **No ad or run counts.** A count beside a competitor name invites reading it as
+  performance, and this product cannot measure performance at all.
+- **No `updated_at`.** It is on both tables and trivially available, but nothing
+  acts on it and shipping it implies a freshness guarantee nobody has defined.
+- Read-only by construction: two `SELECT`s, no collection, AI, media or queue work.
+
+**One shared schema base.** `schemas/base.py` now holds `_Response`, and
+`schemas/ads.py` imports it instead of defining its own. S3.3 schemas adopt the same
+rule rather than copying four lines -- two definitions of "closed and frozen" would
+eventually disagree about whether an unexpected field is an error.
+
+### Two findings, both from mutation testing, both mine
+
+1. **I wrote a false statement about PostgreSQL.** A docstring claimed the default
+   ordering was `NULLS FIRST` for `ASC`. It is the opposite: PostgreSQL defaults to
+   `NULLS LAST` for `ASC` and `NULLS FIRST` for `DESC`. The mutation (deleting the
+   explicit `.nulls_last()`) passed, which is how the error surfaced. The clause is
+   kept -- it states intent and guards a future direction change, since `DESC`
+   really does default to the other behaviour, which is why
+   `services/ad_query.resolve_sort` overrides it explicitly -- but the comment and
+   `test_pages_with_no_name_sort_last` now describe what it protects rather than
+   claiming a difference that does not exist.
+
+2. **My determinism test proved nothing.** It called the endpoint three times and
+   compared the results, which passed even with the `id` tie-break deleted: one
+   connection and one plan returns the same rows in the same order regardless.
+   Rewritten as `test_equal_competitor_names_are_broken_by_id`, which asserts the
+   expected order (ties broken by ascending id). It now fails when the tie-break is
+   removed. **Repeating a request is not a test of determinism; asserting the order
+   is.**
+
+Also mutation-verified: returning a fresh UUID instead of the row's real id fails
+both round-trip tests.
+
+### The tests that matter
+
+`test_a_competitor_id_from_here_filters_ads` and `test_a_page_id_from_here_filters_ads`
+are the point of the endpoint. Without them it would be decorative: a directory
+whose ids do not actually filter `/ads` leaves the frontend exactly where it
+started. The ads are persisted through `persist_observations`, because `/ads`
+filters resolve through `ad_status_by_context` and a hand-inserted `Ad` would not
+exercise that path at all. `test_the_context_reports_the_same_page_id_the_directory_lists`
+pins that one id space serves both, so a client never has to translate.
+
+**`test_api_competitors.py`: 19 tests, all passing.** Targeted regression with
+`test_api_ads.py`, `test_architecture_boundaries.py`, `test_media_url_security.py`,
+`test_offline_guard.py`: **264 passing**. No full suite, no xdist, no parallel runs.
+
+One pre-existing test updated rather than weakened:
+`test_exactly_the_four_s32_routes_are_registered` asserted exactly four paths and is
+necessarily five now. Renamed `test_the_s32_ad_routes_are_registered` and extended
+with `/competitors`; it still pins the whole set.
+
+**Gates.** `ruff check` clean on every changed file. `ruff format --check` clean.
+Project-gate `mypy` clean (58 files). `mypy backend` **59**, unchanged. `alembic
+check` no drift, single head `0011_api_search_indexes`.
+
+**Documentation.** Only `ARCHITECTURE.md`'s API surface, because it claimed four
+shipped routes and "nothing else exists yet", which this step made false. The wider
+S3.3 reconciliation -- `README.md`, `SETUP_WINDOWS.md`, the `IMPLEMENTATION_PLAN.md`
+S7-versus-S3.3 naming, and the PROJECT_MEMORY S3.3 entry -- is **deliberately
+deferred** to the end of S3.3 so the docs describe what shipped rather than what was
+planned.
+
+**Known limitations, unchanged**
+
+- Every table still holds **0 rows**, so no plan, index selection or query cost has
+  been exercised on real data. Index *matching* is proven; index *selection* is not.
+- No ad count per competitor. If the frontend wants "N ads for this competitor", it
+  is a separate aggregate endpoint, not a field invented here.
+- `/ads` carries no AI-interpretation availability field, so a grid cannot show
+  "analysed" without fetching each row. Open from S3.3 discovery.
+- `page_id` is exposed because it is the provider's own identity, different from the
+  internal key. A client must use `id` for filtering and treat `page_id` as display
+  or reconciliation data.
+
+**Next step (not started, needs approval):** the safe seed path --
+`scripts/seed_demo.py` driving `build_mock_pages` ->
+`build_collection_orchestrator` -> `schedule_collection` -> `execute_collection_job`,
+so the frontend is developed against real API-shaped rows produced by the real
+collection path. That step also has to re-key `tests/fixtures/ai/analyses.json` by
+the **real computed** `copy_hash`, because the three placeholder keys cannot satisfy
+`ad_analysis.copy_hash`'s 64-hex `CHECK` and would otherwise yield all-null
+interpretations.

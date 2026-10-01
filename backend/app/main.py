@@ -1,11 +1,12 @@
 """ASGI application entrypoint.
 
-Checkpoint S3.2: the read API for ads, search, and CSV export.
+Checkpoint S3.3 step 1: the competitor directory, added to the S3.2 read API.
 
-  GET /ads
-  GET /ads/{id}
-  GET /ads/{id}/snapshots
-  GET /exports/ads.csv
+  GET /competitors        -- S3.3, the names behind /ads' UUID filters
+  GET /ads                -- S3.2
+  GET /ads/{id}           -- S3.2
+  GET /ads/{id}/snapshots -- S3.2
+  GET /exports/ads.csv    -- S3.2
 
 Still absent by design:
   /healthz                     a liveness probe, and a real need before compose
@@ -25,6 +26,7 @@ from fastapi import FastAPI
 
 from app import __version__
 from app.api.ads import router as ads_router
+from app.api.competitors import router as competitors_router
 from app.api.errors import register_exception_handlers
 from app.core.config import AppEnv, get_settings
 
@@ -39,7 +41,8 @@ def create_app(*, app_env: AppEnv | None = None) -> FastAPI:
             happens to be in the shell.
 
     Returns:
-        The application, with the S3.2 routers and the exception handlers installed.
+        The application, with the ad and competitor routers and the exception
+        handlers installed.
     """
     environment = app_env or get_settings().app_env
 
@@ -56,6 +59,9 @@ def create_app(*, app_env: AppEnv | None = None) -> FastAPI:
         redoc_url=None,
         openapi_url=None if production else "/openapi.json",
     )
+    # Competitors first: it is the directory the ad filters resolve against, so
+    # reading top to bottom starts where a client has to start.
+    app.include_router(competitors_router)
     app.include_router(ads_router)
     register_exception_handlers(app)
     return app
