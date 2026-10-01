@@ -958,6 +958,336 @@ def _wrong_shape(provider: str, *, usage: AIUsage | None = None) -> AIResult:
     )
 
 
+# ============================================================
+# Attempt numbering across job retries (the S3.1 fix pass)
+# ============================================================
+
+
+class RetryableFailureProvider(MockAIProvider):
+    """Fails with a *retryable* typed error for the first `failures` calls.
+
+    `Transient` and `RateLimited` are both `retryable = True`, so `jobs.fail`
+    returns the job to `pending` and the worker legitimately comes back to the same
+    `job_id`. That is the path this whole section exists to cover: attempt numbers
+    must continue, not restart.
+    """
+
+    def __init__(self, failures: int, error: type[AIError], **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.failures = failures
+        self.error = error
+        self.calls = 0
+
+    def analyze_copy(self, request: CopyAnalysisRequest) -> AIResult:
+        self.calls += 1
+        if self.calls <= self.failures:
+            raise self.error("upstream unavailable", provider=self.name)
+        return super().analyze_copy(request)
+
+
+def _requeue_via_jobs(session: Session, job_id: uuid.UUID) -> None:
+    """Fail and re-claim a job exactly as `PostgresJobQueue` would.
+
+    Performed on the *same* session rather than through `PostgresJobQueue`,
+    which opens its own connection -- and the `db_session` fixture holds an outer
+    transaction that is always rolled back, so a second connection can never see
+    these rows at all. The statements below are the queue's own transitions,
+    reproduced so the retry path is exercised rather than asserted by hand:
+
+    `fail` sets `pending` (until `max_attempts`), clears the lease, records the
+    reason; `claim` sets `running`, takes a lease and increments `attempt`.
+    """
+    session.execute(
+        text(
+            "UPDATE jobs SET status = 'pending', worker_id = NULL, "
+            "lease_expires_at = NULL, finished_at = NULL, error_message = :reason, "
+            "updated_at = now() WHERE id = :id"
+        ),
+        {"id": job_id, "reason": "transient upstream"},
+    )
+    before = session.execute(
+        text("SELECT status, attempt FROM jobs WHERE id = :id"), {"id": job_id}
+    ).one()
+    assert before.status == "pending", "the queue did not release a retryable job"
+
+    session.execute(
+        text(
+            "UPDATE jobs SET status = 'running', worker_id = :worker, "
+            "lease_expires_at = :lease, attempt = attempt + 1, "
+            "started_at = COALESCE(started_at, now()), updated_at = now() "
+            "WHERE id = :id"
+        ),
+        {
+            "id": job_id,
+            "worker": "test-worker",
+            "lease": datetime.now(UTC) + timedelta(minutes=5),
+        },
+    )
+    session.flush()
+    after = session.execute(text("SELECT attempt FROM jobs WHERE id = :id"), {"id": job_id}).one()
+    # `jobs.attempt` counts worker *claims*; `ai_jobs.attempt_no` counts provider
+    # *calls*. They are different counters and a job retry advances both -- one
+    # claim can be several calls, via the corrective retry.
+    assert after.attempt == before.attempt + 1, "the queue did not count the claim"
+
+
+def test_the_first_execution_records_attempt_one(db_session: Session) -> None:
+    """One provider call, one row, attempt 1."""
+    page_id = _page(db_session, "100000000000601")
+    _ad, snapshot = _snapshot(db_session, page_id=page_id, record=_record())
+    provider = _analysis_for(snapshot, CopyAnalysis(hook="Opens on price."))
+
+    outcome = run_analysis_job(
+        db_session, provider, job_id=_queue_job(db_session), snapshot_id=snapshot.id
+    )
+
+    assert provider is not None
+    assert outcome.attempts == 1
+    rows = _ai_jobs(db_session)
+    assert len(rows) == 1
+    assert rows[0].attempt_no == 1
+    assert rows[0].call_kind == AIJobCallKind.INITIAL
+    assert rows[0].status == AIJobStatus.SUCCEEDED
+
+
+def test_an_invalid_first_response_takes_attempts_one_and_two(db_session: Session) -> None:
+    """The corrective retry continues the sequence rather than restarting it."""
+    page_id = _page(db_session, "100000000000602")
+    _ad, snapshot = _snapshot(db_session, page_id=page_id, record=_record())
+
+    provider = FlakyProvider(
+        failures=1, responses={snapshot.copy_hash or "": CopyAnalysis(hook="Opens on price.")}
+    )
+    run_analysis_job(db_session, provider, job_id=_queue_job(db_session), snapshot_id=snapshot.id)
+
+    rows = _ai_jobs(db_session)
+    assert [r.attempt_no for r in rows] == [1, 2]
+    assert [r.call_kind for r in rows] == [
+        AIJobCallKind.INITIAL,
+        AIJobCallKind.INVALID_JSON_RETRY,
+    ]
+
+
+def test_an_outer_job_retry_continues_the_attempt_sequence(db_session: Session) -> None:
+    """The defect this fix pass exists for.
+
+    A retryable failure returns the job to `pending`; the worker claims the *same*
+    `job_id` and makes a real second provider call. That call must be attempt 2,
+    not a silent overwrite-or-drop of attempt 1.
+    """
+    page_id = _page(db_session, "100000000000603")
+    _ad, snapshot = _snapshot(db_session, page_id=page_id, record=_record())
+    job_id = _queue_job(db_session)
+
+    class CountingUsage(MockAIProvider):
+        def __init__(self, *, failures: int, **kwargs: Any) -> None:
+            super().__init__(**kwargs)
+            self.failures = failures
+            self.calls = 0
+
+        def analyze_copy(self, request: CopyAnalysisRequest) -> AIResult:
+            self.calls += 1
+            result = super().analyze_copy(request)
+            if self.calls <= self.failures:
+                raise Transient("upstream unavailable", provider=self.name)
+            return AIResult(
+                analysis=result.analysis,
+                provider=self.name,
+                model="mock-model-v1",
+                usage=AIUsage(prompt_tokens=10 * self.calls, total_tokens=10 * self.calls),
+            )
+
+    provider = CountingUsage(
+        failures=1, responses={snapshot.copy_hash or "": CopyAnalysis(hook="Opens on price.")}
+    )
+
+    with pytest.raises(Transient):
+        run_analysis_job(db_session, provider, job_id=job_id, snapshot_id=snapshot.id)
+    db_session.commit()
+
+    first = _ai_jobs(db_session)
+    assert len(first) == 1
+    assert first[0].attempt_no == 1
+    assert first[0].status == AIJobStatus.FAILED
+
+    # The real queue puts it back, and the worker takes it again.
+    _requeue_via_jobs(db_session, job_id)
+    db_session.commit()
+
+    outcome = run_analysis_job(db_session, provider, job_id=job_id, snapshot_id=snapshot.id)
+    db_session.commit()
+
+    rows = _ai_jobs(db_session)
+    assert provider.calls == 2, "the retry did not make a real provider call"
+    assert [r.attempt_no for r in rows] == [1, 2], "the retry reused or lost an attempt number"
+    assert rows[0].status == AIJobStatus.FAILED, "the earlier failure was overwritten"
+    assert rows[1].status == AIJobStatus.SUCCEEDED
+    # The retry's usage is preserved -- the whole point of keeping the ledger.
+    assert rows[1].prompt_tokens == 20
+    assert rows[1].total_tokens == 20
+    assert outcome.wrote_analysis
+
+
+def test_a_correction_then_a_job_retry_keeps_counting(db_session: Session) -> None:
+    """Attempts 1, 2, 3: corrective retry, then a real outer retry."""
+    page_id = _page(db_session, "100000000000604")
+    _ad, snapshot = _snapshot(db_session, page_id=page_id, record=_record())
+    job_id = _queue_job(db_session)
+
+    # Call 1 unusable, call 2 unusable too -> the job fails after the budget.
+    class TwoBadThenTransient(MockAIProvider):
+        def __init__(self, **kwargs: Any) -> None:
+            super().__init__(**kwargs)
+            self.calls = 0
+
+        def analyze_copy(self, request: CopyAnalysisRequest) -> AIResult:
+            self.calls += 1
+            if self.calls <= 2:
+                return _wrong_shape(self.name)
+            raise Transient("upstream unavailable", provider=self.name)
+
+    provider = TwoBadThenTransient(
+        responses={snapshot.copy_hash or "": CopyAnalysis(hook="Opens on price.")}
+    )
+    with pytest.raises(InvalidResponse):
+        run_analysis_job(db_session, provider, job_id=job_id, snapshot_id=snapshot.id)
+    db_session.commit()
+
+    assert [r.attempt_no for r in _ai_jobs(db_session)] == [1, 2]
+
+    _requeue_via_jobs(db_session, job_id)
+    db_session.commit()
+
+    with pytest.raises(Transient):
+        run_analysis_job(db_session, provider, job_id=job_id, snapshot_id=snapshot.id)
+    db_session.commit()
+
+    rows = _ai_jobs(db_session)
+    assert [r.attempt_no for r in rows] == [1, 2, 3], "an attempt row was lost"
+    assert [r.call_kind for r in rows] == [
+        AIJobCallKind.INITIAL,
+        AIJobCallKind.INVALID_JSON_RETRY,
+        AIJobCallKind.INITIAL,
+    ]
+    assert provider.calls == 3
+
+
+def test_every_provider_call_is_accounted_for(db_session: Session) -> None:
+    """`calls == rows`, which is the property the whole ledger exists for."""
+    page_id = _page(db_session, "100000000000605")
+    _ad, snapshot = _snapshot(db_session, page_id=page_id, record=_record())
+    job_id = _queue_job(db_session)
+
+    class Mixed(MockAIProvider):
+        def __init__(self, **kwargs: Any) -> None:
+            super().__init__(**kwargs)
+            self.calls = 0
+
+        def analyze_copy(self, request: CopyAnalysisRequest) -> AIResult:
+            self.calls += 1
+            if self.calls <= 2:
+                # Two unusable answers: the corrective retry spends its budget and
+                # the job fails.
+                return _wrong_shape(self.name)
+            if self.calls == 3:
+                # A retryable failure: the job goes back to `pending`.
+                raise Transient("unavailable", provider=self.name)
+            return super().analyze_copy(request)
+
+    provider = Mixed(responses={snapshot.copy_hash or "": CopyAnalysis(hook="Opens on price.")})
+
+    with pytest.raises(InvalidResponse):
+        run_analysis_job(db_session, provider, job_id=job_id, snapshot_id=snapshot.id)
+    db_session.commit()
+    _requeue_via_jobs(db_session, job_id)
+    db_session.commit()
+    with pytest.raises(Transient):
+        run_analysis_job(db_session, provider, job_id=job_id, snapshot_id=snapshot.id)
+    db_session.commit()
+    _requeue_via_jobs(db_session, job_id)
+    db_session.commit()
+    run_analysis_job(db_session, provider, job_id=job_id, snapshot_id=snapshot.id)
+    db_session.commit()
+
+    assert provider.calls == 4
+    rows = _ai_jobs(db_session)
+    assert len(rows) == provider.calls, "a provider call left no accounting row"
+    assert [r.attempt_no for r in rows] == [1, 2, 3, 4]
+    assert [r.status for r in rows] == [
+        AIJobStatus.INVALID_RESPONSE,
+        AIJobStatus.INVALID_RESPONSE,
+        AIJobStatus.FAILED,
+        AIJobStatus.SUCCEEDED,
+    ]
+    # One analysis, despite three worker invocations.
+    assert len(_analyses(db_session)) == 1
+
+
+def test_the_successful_retry_does_not_leave_a_failed_ledger(db_session: Session) -> None:
+    """Failure then success: the ledger shows both, in order, and one analysis."""
+    page_id = _page(db_session, "100000000000606")
+    _ad, snapshot = _snapshot(db_session, page_id=page_id, record=_record())
+    job_id = _queue_job(db_session)
+
+    provider = RetryableFailureProvider(
+        failures=1,
+        error=Transient,
+        responses={snapshot.copy_hash or "": CopyAnalysis(hook="Opens on price.")},
+    )
+    with pytest.raises(Transient):
+        run_analysis_job(db_session, provider, job_id=job_id, snapshot_id=snapshot.id)
+    db_session.commit()
+
+    _requeue_via_jobs(db_session, job_id)
+    db_session.commit()
+    run_analysis_job(db_session, provider, job_id=job_id, snapshot_id=snapshot.id)
+    db_session.commit()
+
+    rows = _ai_jobs(db_session)
+    assert [(r.attempt_no, r.status) for r in rows] == [
+        (1, AIJobStatus.FAILED),
+        (2, AIJobStatus.SUCCEEDED),
+    ]
+    analyses = _analyses(db_session)
+    assert len(analyses) == 1, "the analysis was written twice"
+    # The successful attempt is the one that produced it.
+    assert analyses[0].hook == "Opens on price."
+
+
+def test_an_attempt_collision_raises_rather_than_dropping_the_row(
+    db_session: Session,
+) -> None:
+    """A numbering bug must be loud, not a quietly missing cost record."""
+    from app.services.ai_analysis import next_attempt_no
+
+    job_id = _queue_job(db_session)
+    assert next_attempt_no(db_session, job_id) == 1
+
+    db_session.execute(
+        text(
+            "INSERT INTO ai_jobs (id, job_id, attempt_no, call_kind, copy_hash, "
+            "analysis_version, provider, status, error_message, started_at) VALUES "
+            "(:id, :job, 1, 'initial', :hash, :version, 'mock', 'failed', 'x', now())"
+        ),
+        {"id": uuid.uuid4(), "job": job_id, "hash": "a" * 64, "version": ANALYSIS_VERSION},
+    )
+    db_session.flush()
+    assert next_attempt_no(db_session, job_id) == 2
+
+    # Inserting attempt 1 again now raises instead of being swallowed.
+    with pytest.raises(IntegrityError) as caught:
+        db_session.execute(
+            text(
+                "INSERT INTO ai_jobs (id, job_id, attempt_no, call_kind, copy_hash, "
+                "analysis_version, provider, status, error_message, started_at) VALUES "
+                "(:id, :job, 1, 'initial', :hash, :version, 'mock', 'failed', 'y', now())"
+            ),
+            {"id": uuid.uuid4(), "job": job_id, "hash": "b" * 64, "version": ANALYSIS_VERSION},
+        )
+    assert "uq_ai_jobs_job_attempt" in str(caught.value)
+    db_session.rollback()
+
+
 class FlakyProvider(MockAIProvider):
     """Fails validation `failures` times, then answers properly.
 

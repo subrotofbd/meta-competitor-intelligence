@@ -360,7 +360,12 @@ Every host is `example.invalid` (RFC 2606, cannot resolve). No real Page ID, Ad 
 Keyed by `copy_hash` (the same key results are deduplicated on in storage), injected at
 construction. Three stored analyses: English (`en`, 15/16 fields, `urgency` left `null`
 because the copy claims no urgency), Hindi/Hinglish (`hi`, 14/16, analysed in Hindi with the
-English summary alongside), and a sparse case (0/16). An unknown `copy_hash` returns
+analysis fields written in Hindi), and a sparse case (0/16). **There are no English summary
+fields** -- S3.1 has one set of fields, in the copy's own language, and `language` records which.
+This corrects an earlier entry in this same section, which wrongly said the Hindi fixture carried
+"the English summary alongside"; that contradicted the locked D-A decision and no such field has
+ever existed. English summaries, if ever wanted, are deferred to a future explicit
+schema/version decision. An unknown `copy_hash` returns
 `CopyAnalysis()` -- fourteen nulls, not a generated sentence. A test asserts the field set
 contains **no** performance field (`spend`, `revenue`, `roas`, `leads`, `conversions`,
 `reach`, `impressions`, `clicks`, `ctr`, `performance`), so one cannot be added by accident.
@@ -1852,6 +1857,65 @@ Future reporting must support **downloadable competitor-intelligence reports**, 
 distinguish observed, calculated, provider-reported, client-provided and unavailable metrics.
 **CSV export is future S3 scope.** None of this is implemented in S2.3.
 
+### 13a. S3.1 fix pass -- AI JOB ATTEMPT ACCOUNTING
+
+**The defect.** `run_analysis_job` restarted `attempt_no` at 1 on every invocation, and `_record_attempt`
+wrote with `ON CONFLICT DO NOTHING` on `UNIQUE(job_id, attempt_no)`. A **retryable** provider failure
+(`Transient`, `RateLimited` -- both `retryable = True`) sends the job back to `pending`, the worker
+claims the *same* `job_id` again, and its real second provider call collided with attempt 1 and was
+**silently discarded**. The retry's tokens and cost were lost, and if that retry *succeeded*,
+`ad_analysis` existed while the ledger still read `status = 'failed'`.
+
+Proven against the live database before the fix (transaction rolled back):
+
+    rows after 1st job attempt          : 1
+    rows after a 2nd job-level attempt  : 1
+    => the job-level retry's provider call was SILENTLY DROPPED
+
+**The fix.** `next_attempt_no(session, job_id)` reads `MAX(attempt_no)` for the job and continues the
+sequence, so one job's attempts run 1 (initial), 2 (corrective retry), 3 (first outer retry), 4, ...
+The corrective retry takes `first_attempt_no + 1` rather than a literal 2.
+
+**Safe under the lease model** because only one worker holds a job lease at a time
+(`SELECT ... FOR UPDATE SKIP LOCKED`), so two workers cannot allocate against the same `job_id`
+concurrently, and the read happens inside the claiming worker's own transaction.
+
+**`_record_attempt` no longer swallows a collision.** `ON CONFLICT DO NOTHING` is gone; a numbering
+bug now raises `IntegrityError` and fails the transaction loudly, which is the correct trade for the
+one table whose only job is to say what the product spent.
+
+**Nothing else changed:** `UNIQUE(job_id, attempt_no)`, `call_kind`, provider/model, usage, cost,
+status, errors and timing are all preserved; the corrective retry is still exactly one; `jobs` is
+still the only queue; no Redis, no second retry framework.
+
+**Tests added (7).** First execution records attempt 1; an invalid first response takes attempts 1
+and 2; **an outer job retry continues the sequence** and preserves the retry's usage; a corrective
+retry followed by an outer retry yields 1, 2, 3 with no collision; `provider call count == ai_jobs row
+count` across three worker invocations; a failed call followed by a successful retry leaves both rows
+in order with exactly one `ad_analysis`; and an attempt collision raises rather than dropping the row.
+
+- **Mutation-verified:** resetting the counter to 1 on outer retry fails **4** of them.
+- `_requeue_via_jobs` reproduces the queue's own `fail`/`claim` SQL on the same session rather than
+  calling `PostgresJobQueue`, because that opens its own connection and the `db_session` fixture's
+  outer transaction is always rolled back -- a second connection can never see test rows.
+
+**Documentation corrected.** `ARCHITECTURE.md`'s Layout listed `providers/ai/{base.py, openai.py,
+gemini.py}`; the latter two have never existed, and the list now shows what is real. `PROJECT_MEMORY.md`
+no longer claims the Hindi fixture carries "the English summary alongside" (see the correction note
+there), which contradicted D-A.
+
+**Constraint renamed.** `0009` created one constraint with a literal, already-prefixed name, so the
+convention prefixed it twice and the database held `ck_ai_jobs_ck_ai_jobs_cost_all_or_nothing` while
+`models/analysis.py` declared `cost_all_or_nothing`. `alembic check` does not compare CHECK
+constraint *names*, only expressions, which is why it reported no drift. Migration
+**`0010_ai_jobs_cost_name`** drops and re-adds the **identical expression** under the conventional
+name: DDL only, no row read or written, semantics unchanged, reversible.
+
+Two things worth knowing about that migration: `op.drop_constraint`/`op.create_check_constraint`
+apply the naming convention too, so both names are wrapped in `op.f()`; and the revision id is 22
+characters because `alembic_version.version_num` is `VARCHAR(32)`, and an over-long id fails at insert
+rather than at revision load.
+
 ### 13. S3.1 -- AI COPY ANALYSIS: COMPLETE
 
 Migration `0009_ai_analysis`, applied and at head. **References and interpretation only -- no media, no
@@ -1894,10 +1958,27 @@ is **NULL in S3.1** because no documented pricing method exists -- which is the 
 **Zero is never written in place of unavailable.** Usage is recorded even on a call that failed: the model
 was billed for those tokens whether or not we could use the reply.
 
-**Per-run cap.** `ai_max_analyses_per_run`, `gt=0` so `0` is a startup error rather than a silent
-disabling. Per `collection_run_id`. Counts **analyses scheduled**, not provider calls. **A duplicate
-consumes no budget** -- without that, a re-run over unchanged copy would spend the whole cap finding
-nothing. Reaching the cap stops scheduling and is **not a run failure**: no exception, no error recorded.
+**Per-run cap -- exact semantics, and what is NOT enforced.** `ai_max_analyses_per_run`, `gt=0` so
+`0` is a startup error rather than a silent disabling. Counts **analyses scheduled by one call to
+`schedule_for_run`**, not provider calls. **A duplicate consumes no budget** -- without that, a
+re-run over unchanged copy would spend the whole cap finding nothing. Reaching the cap stops
+scheduling and is **not a run failure**: no exception, no error recorded.
+
+Two limitations, stated plainly rather than papered over:
+
+1. **There is no `collection_run_id` on `ad_analysis` or `ai_jobs`, and `schedule_for_run` does not
+   take a `run_id`.** "Per collection run" is therefore a *caller convention* -- one call per run --
+   and not something the database can enforce or an auditor can verify afterwards.
+2. **The cap is a soft guard, not a hard one.** Two concurrent schedulers for the same run could each
+   apply the full budget, so the effective ceiling is a multiple of `ai_max_analyses_per_run` rather
+   than exactly it.
+
+**What still bounds real spend**, which is why this was not treated as a blocker: the
+`UNIQUE(copy_hash, analysis_version)` dedupe is enforced by the database, and the handler re-checks
+it before calling the provider. A duplicate job makes **zero** provider calls. So the number of paid
+calls is bounded by the number of *distinct* copy hashes, not by the cap. A hard,
+database-enforced cap would need a reservation or locking scheme -- deliberately **not** built
+speculatively in this fix pass, and recorded here as a future decision if the project ever needs one.
 
 **Provider interface.** `analyze_copy` now returns `AIResult(analysis, provider, model, usage)` rather
 than a bare `CopyAnalysis`, which had nowhere to put a token count, a model name, or a provider name, and

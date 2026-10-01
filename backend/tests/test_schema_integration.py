@@ -69,6 +69,7 @@ S22_REVISION = "0006_s2_2_hashes"
 S23_REVISION = "0007_status_by_context"
 S24_REVISION = "0008_media_assets"
 S31_REVISION = "0009_ai_analysis"
+S31_FIX_REVISION = "0010_ai_jobs_cost_name"
 BASE_REVISION = "0001_pg_trgm"
 
 NOW = datetime(2026, 9, 30, 9, 0, tzinfo=UTC)
@@ -136,7 +137,7 @@ def test_the_migration_applies_and_leaves_one_head() -> None:
     assert len(ScriptDirectory.from_config(_config()).get_heads()) == 1
     with get_engine().connect() as connection:
         applied = connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-    assert applied == S31_REVISION
+    assert applied == S31_FIX_REVISION
 
 
 def test_the_s24_downgrade_renders_complete_sql_without_executing_it() -> None:
@@ -263,6 +264,7 @@ def test_the_revision_history_is_one_unbranched_chain() -> None:
     revisions = {revision.revision: revision.down_revision for revision in script.walk_revisions()}
 
     assert revisions == {
+        S31_FIX_REVISION: S31_REVISION,
         S31_REVISION: S24_REVISION,
         S24_REVISION: S23_REVISION,
         S23_REVISION: S22_REVISION,
@@ -273,7 +275,7 @@ def test_the_revision_history_is_one_unbranched_chain() -> None:
         S11_REVISION: BASE_REVISION,
         BASE_REVISION: None,
     }
-    assert list(script.get_heads()) == [S31_REVISION]
+    assert list(script.get_heads()) == [S31_FIX_REVISION]
 
 
 def test_the_s23_downgrade_renders_complete_sql_without_executing_it() -> None:

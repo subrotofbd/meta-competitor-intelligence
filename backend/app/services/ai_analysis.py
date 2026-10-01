@@ -74,7 +74,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
@@ -199,6 +199,40 @@ def find_existing(session: Session, copy_hash: str, analysis_version: str) -> uu
             AdAnalysis.analysis_version == analysis_version,
         )
     ).scalar_one_or_none()
+
+
+def next_attempt_no(session: Session, job_id: uuid.UUID) -> int:
+    """The next free `attempt_no` for this job, continuing the existing sequence.
+
+    ## Why this is a query and not a counter starting at one
+
+    Every actual provider call must produce exactly one `ai_jobs` row, and
+    `UNIQUE(job_id, attempt_no)` makes the number the identity of a call. An
+    earlier version restarted at 1 on every invocation of `run_analysis_job`,
+    which was correct for the corrective retry *inside* one claimed job and
+    completely wrong for an **outer** job retry: `jobs.fail` returns the job to
+    `pending` for a retryable provider failure, the worker claims the same
+    `job_id` again, and its first call collided with attempt 1. `ON CONFLICT DO
+    NOTHING` then swallowed the row, so the retry's tokens and cost were lost --
+    and if that retry *succeeded*, `ad_analysis` existed while the ledger still
+    said `failed`.
+
+    So the sequence continues: 1 initial, 2 the corrective retry, 3 the first
+    outer retry, and so on.
+
+    ## Why this is safe under the lease model
+
+    Only one worker holds a job lease at a time (`SELECT ... FOR UPDATE SKIP
+    LOCKED` in `PostgresJobQueue`), and two workers therefore cannot allocate
+    against the same `job_id` concurrently. The read happens inside the claiming
+    worker's own transaction, so it sees that worker's own earlier attempts. The
+    unique constraint remains the backstop, and a collision now **raises**
+    instead of silently discarding an accounting row.
+    """
+    highest = session.execute(
+        select(func.max(AIJob.attempt_no)).where(AIJob.job_id == job_id)
+    ).scalar_one()
+    return 1 if highest is None else highest + 1
 
 
 def _already_analysed(session: Session, copy_hash: str, analysis_version: str) -> bool:
@@ -347,8 +381,14 @@ def run_analysis_job(
     base_request = build_request(snapshot)
     last_error: str | None = None
 
-    for attempt_no in range(1, MAX_CORRECTIVE_RETRIES + 2):
-        is_retry = attempt_no > 1
+    # Continuing whatever sequence this job already has, NOT restarting at 1. A
+    # retryable provider failure returns the job to `pending` and the worker comes
+    # back to the same `job_id`, so attempt 1 may already be taken.
+    first_attempt_no = next_attempt_no(session, job_id)
+
+    for offset in range(MAX_CORRECTIVE_RETRIES + 1):
+        attempt_no = first_attempt_no + offset
+        is_retry = offset > 0
         call_kind = AIJobCallKind.INVALID_JSON_RETRY if is_retry else AIJobCallKind.INITIAL
 
         try:
@@ -437,7 +477,7 @@ def run_analysis_job(
             result=result,
             configured_model=configured_model,
         )
-        return AnalysisOutcome(analysis_id=analysis_id, wrote_analysis=True, attempts=attempt_no)
+        return AnalysisOutcome(analysis_id=analysis_id, wrote_analysis=True, attempts=offset + 1)
 
     raise AssertionError("unreachable: the final iteration either returns or raises")
 
@@ -503,14 +543,18 @@ def _record_attempt(
     future checkpoint with a real price fills all three together, because the
     all-or-nothing CHECK refuses any two of them.
 
-    `ON CONFLICT DO NOTHING` on `(job_id, attempt_no)`: a reprocessed job
-    re-states a call rather than adding a second row for it.
+    **A conflict raises.** It used to be `ON CONFLICT DO NOTHING`, which quietly
+    discarded the accounting row for a real provider call whenever the attempt
+    number collided -- the outer-job-retry defect this function's caller now
+    avoids by allocating with `next_attempt_no`. Keeping `DO NOTHING` would hide
+    the next occurrence of the same mistake; raising turns a lost cost record
+    into a loud, transactional failure, which is the correct trade for a table
+    whose only job is to say what the product spent.
     """
     finished = datetime.now(UTC)
     started = started_at if started_at.tzinfo is not None else started_at.replace(tzinfo=UTC)
     session.execute(
-        insert(AIJob)
-        .values(
+        insert(AIJob).values(
             job_id=job_id,
             attempt_no=attempt_no,
             call_kind=call_kind,
@@ -530,7 +574,6 @@ def _record_attempt(
             finished_at=finished,
             duration_ms=max(0, int((finished - started).total_seconds() * 1000)),
         )
-        .on_conflict_do_nothing(constraint="uq_ai_jobs_job_attempt")
     )
     session.flush()
 

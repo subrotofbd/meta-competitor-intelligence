@@ -25,7 +25,7 @@ scope and only leaves seams. See IMPLEMENTATION_PLAN.md.
 frontend/  backend/app/{api,core,db,models,schemas,services}  worker/  database/migrations
 scripts/   docs/   docker/   storage/   tests/
 backend/app/providers/data/{base.py, official_api.py, public_ui.py, apify.py, manual_import.py}
-backend/app/providers/ai/{base.py, openai.py, gemini.py}
+backend/app/providers/ai/{base.py, models.py, errors.py, mock.py}   # no real provider yet
 ```
 
 ## Provider abstraction
