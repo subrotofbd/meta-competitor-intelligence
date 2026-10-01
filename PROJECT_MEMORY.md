@@ -1652,6 +1652,13 @@ Every mutation was reverted and the file verified byte-intact.
 
 Migration `0008_media_assets`, applied and at head. Two tables, **references only**.
 
+**Checkpoint commit:** `ff7ba7d` "feat: complete S2.4 media references" (14 files). It could not
+contain its own hash, so it is recorded here in this follow-up commit, as at S0.1.
+
+**Git state correction:** an earlier section records "no remote". That is no longer true -- an
+`origin` remote (`subrotofbd/meta-competitor-intelligence`) is now configured, and S2.3 already sits
+on `origin/main`. **S2.4 is committed locally and NOT pushed.**
+
 **`media_assets`** -- `(provider, provider_key)` unique, `source_url`, `mime`, `width`, `height`,
 `duration_seconds NUMERIC`, `storage_key`, `byte_size`, `first_seen_at`, `last_seen_at`.
 **No foreign key out of it**: an asset is shared identity, and the committed corpus proves it
