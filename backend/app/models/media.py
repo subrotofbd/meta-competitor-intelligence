@@ -62,8 +62,16 @@ are `AdSnapshotMedia` rows and the append-only `AdSnapshot` rows they point at.
 Updating a row here updates a *summary* of observations, never one of them.
 
 `AdSnapshotMedia` is append-only in the same sense `seen_in_run` is: one row per
-(snapshot, asset), upserted, never rewritten to say something different about a
-snapshot that already happened.
+(snapshot, asset), upserted, and **never rewritten to say something different about a
+snapshot that already happened**. Its `position` in particular is captured once, by the
+observation that created the snapshot, and is never revised by a later one --
+`ad_snapshots.normalized` holds that snapshot's original media order and remains
+authoritative for it. `app/services/media_references.py` explains why re-deriving that
+order is impossible rather than merely discouraged.
+
+Note the asymmetry with the table above, which is deliberate: `last_seen_at` on a
+shared asset answers "when did we last see this", which genuinely changes, while
+`position` on a link answers "what did *this* snapshot contain", which cannot.
 """
 
 from __future__ import annotations
@@ -205,7 +213,13 @@ class AdSnapshotMedia(Base, UuidPrimaryKeyMixin, TimestampMixin):
         nullable=False,
     )
 
-    #: Where this asset sat in the record's media tuple, in **provider order**.
+    #: Where this asset sat in the record's media tuple, in **provider order**,
+    #: **as captured when the snapshot was created**.
+    #:
+    #: Written once and never revised. The ordering this reports is the one in the
+    #: owning snapshot's own `normalized` JSON, and that JSON is append-only, so
+    #: letting a later observation move this would put two tables into
+    #: disagreement about a single immutable snapshot.
     #:
     #: Ordinal presentation information and nothing more. `creative_hash` v1
     #: *sorts* the provider keys before hashing, so this column cannot and does not

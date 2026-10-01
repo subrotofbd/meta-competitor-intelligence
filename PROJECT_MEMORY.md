@@ -1695,10 +1695,12 @@ are upserts on their unique constraints, so reprocessing is idempotent. Zero med
 `position` is the provider-order index and **never feeds a digest** -- `content_hash` v1 and
 `creative_hash` v1 both *sort* media keys.
 
-- `position` **is** re-derived on a later write, and that is load-bearing rather than incidental:
-  `content_hash` sorts media keys, so a provider reshuffle yields an identical digest and therefore
-  **the same snapshot**. The links are then re-derived against provider order. Writing `position`
-  only on insert would leave every row describing whichever observation arrived first.
+- `position` is **immutable once the link exists** (see the S2.4 fix pass below). It is captured
+  from the observation that created the snapshot, and no later observation rewrites it. This is
+  forced by `content_hash` v1 sorting media keys: a provider reshuffle yields an identical digest
+  and therefore **the same snapshot**, so re-deriving `position` would make
+  `ad_snapshot_media` contradict the append-only `ad_snapshots.normalized` for one immutable
+  snapshot.
 
 **No download guarantee:** nothing calls a `MediaStore`, no upload, no fetch, no hash of bytes, no
 remote request. `source_url` is stored verbatim and never requested (`DATA_ACCESS.md` records these
@@ -1717,17 +1719,26 @@ NOT refused** -- S1.3 settled that a destination carrying userinfo is stored ver
 stays in `ad_snapshots.normalized`, which remains authoritative for them. `ads` and `ad_snapshots`
 were not altered at all -- the migration only creates.
 
-**Tests:** 61 new (36 `test_media_references.py`, 19 `test_media_url_security.py`, 6 schema).
-Full suite **957 passed** (was 896). `ruff check`/`format` clean. Project-gate `mypy` clean;
-`mypy backend` back at its **61-error** pre-existing baseline with zero from S2.4.
+**Tests (corrected -- see the fix pass below):** 59 targeted S2.4 tests were written --
+40 in `test_media_references.py` and 19 in `test_media_url_security.py`. Four schema tests are
+genuinely new (`test_the_s24_downgrade_renders_complete_sql_without_executing_it`,
+`test_the_s24_tables_exist_with_their_expected_columns`,
+`test_the_s24_indexes_exist_in_the_database`, `test_media_assets_carries_no_foreign_key`).
+Two further schema/migration tests were **modified or renamed**, not created:
+`test_the_migration_applies_and_leaves_one_head` only had its expected revision changed, and
+`test_the_revision_history_is_one_unbranched_chain` replaced the S2.3
+`test_s23_extends_the_s22_revision_rather_than_branching`. Counting those as new was the error
+corrected here. Full suite at S2.4 was **957 passed** (was 896); the +61 delta is the real
+measurement and is not decomposed here because part of it is unverified. `ruff check`/`format`
+clean. Project-gate `mypy` clean; `mypy backend` back at its **61-error** pre-existing baseline
+with zero from S2.4.
 
-**Five mutations verified, all detected:**
+**Mutations verified as at the original S2.4 commit:**
 
 | Mutation | Caught by |
 |---|---|
 | `position` never written | `test_provider_order_is_preserved_in_position` |
-| `position` not re-derived on a provider reorder | `test_position_follows_a_provider_reorder_of_the_same_snapshot` |
-| provider order discarded (position from sorted keys) | same |
+| provider order discarded (position from sorted keys) | position/order tests |
 | `first_seen_at` refreshed on upsert | `test_first_seen_at_survives_a_deliberately_wrong_value` |
 | userinfo guard disabled | 11 failures in `test_media_url_security.py` |
 
@@ -1735,7 +1746,7 @@ Three of these **initially did not fail**, and the reasons are worth keeping:
 
 1. Comparing two `now()` values cannot detect an upsert that refreshes `first_seen_at` -- both
    writes land in the same clock second. The test now plants a sentinel from the past.
-2. Nothing exercised a provider *reorder*, so `position` re-derivation was untested.
+2. Nothing exercised a provider *reorder*.
 3. `_assets`/`_links` returned identity-mapped ORM objects without refreshing them, so a read after
    a write returned pre-write values. Both helpers now `expire_all()`.
 
@@ -1759,6 +1770,66 @@ Three of these **initially did not fail**, and the reasons are worth keeping:
 **Deferred deliberately:** `ad_creatives` (needs a normalizer change first -- only `bodies[0]` is
 read), `ad_platforms`, `ad_countries`, `landing_pages`, media byte acquisition, thumbnails, ffmpeg,
 `S3Store`, `creative_hash` v2.
+
+### 11a. S2.4 review findings and the fix pass
+
+A read-only review of `ff7ba7d` returned **NEEDS FIX** with five findings. All five are resolved.
+Nothing about the schema, the migration, the hashes, or S2.3 changed.
+
+**D1 -- `position` is now immutable (the substantive fix).** The rule is locked:
+
+> `ad_snapshot_media.position` is the provider-order position captured when that
+> `ad_snapshot` was created. Once the link exists, `position` MUST NOT be rewritten.
+
+Two independent defences, because the rule is stronger than "the caller behaves":
+
+1. `link_snapshot_media` takes `snapshot_created` and writes **links only when a snapshot was
+   created**. Asset recency (`media_assets.last_seen_at`) still advances on every observation.
+2. `_link`'s conflict arm updates `updated_at` only -- `position` and `created_at` are absent.
+
+The reason the rule is *forced* rather than preferred: `content_hash` v1 hashes media keys
+**sorted**, so a provider reshuffle yields an identical digest and therefore the same snapshot. An
+earlier version re-derived `position` on that path, which left `ad_snapshot_media` contradicting
+the append-only `ad_snapshots.normalized` for one immutable snapshot. `normalized` is authoritative
+and the link now agrees with it.
+
+A genuinely different *key set* still moves `content_hash`, so S2.1 writes a new snapshot and that
+snapshot's links capture the new positions.
+
+- **Mutation-verified, four mutations, all detected.** Two of them initially **survived** and the
+  reason matters: the gate and the conflict arm were redundant, so breaking either one alone was
+  invisible. They are now pinned separately.
+
+| Mutation | Caught by |
+|---|---|
+| `position` back in the conflict update set | `test_position_is_written_once_and_never_rewritten` |
+| links written on every observation | `test_an_unchanged_observation_manufactures_no_link_for_a_pre_s24_snapshot` |
+| `position` derived from sorted keys | `test_position_agrees_with_the_normalized_json_of_its_own_snapshot` + `..._new_snapshot_which_takes_new_positions` |
+| caller always claims a new snapshot | both of the above |
+
+**D2 -- the vacuous hash test is gone.** `test_media_writes_touch_no_hash` recomputed three digests
+from the same frozen `RawAdRecord` before and after the writes; since the hash functions are pure
+and the record is immutable, it could not fail under any mutation. It is replaced by
+`test_media_writes_leave_the_persisted_hashes_byte_for_byte_unchanged`, which reads
+`content_hash`/`copy_hash`/`creative_hash` **back out of the `ad_snapshots` row** after the media
+writes and a re-observation. That is the claim actually worth making, and a writer that recomputed a
+digest from a current observation would now be caught.
+
+**D3/D5 -- docstrings corrected.** `media_references.py`'s module docstring no longer claims the
+service runs "immediately after a new snapshot is flushed"; it documents the two schedules (asset
+recency every observation, links only on snapshot creation) and why `position` cannot be
+re-derived. `_link`'s docstring now separates the three lifetimes instead of contradicting itself.
+
+**D4 -- test attribution corrected** in the entry above. The previously recorded "61 new (36 + 19 +
+6 schema)" double-counted two modified tests as new; the honest figures are 40 + 19 targeted and 4
+genuinely new schema tests. The earlier checkpoint history is preserved, not rewritten.
+
+**Fix-pass validation (targeted only; the full suite was deliberately not re-run):**
+`test_media_references.py` 40 passed, `test_media_url_security.py` 19 passed, normalizer +
+provider contracts 75 passed, ad persistence + all three hash suites + status evaluator 190 passed,
+collection ordering/hardening + schema/models/migrations 200 passed. `ruff check` and
+`ruff format --check` clean. Project-gate `mypy` clean; `mypy backend` at its **61-error**
+pre-existing baseline with zero from this pass.
 
 ### 12. Future S3 AI Campaign Advisor and reporting -- RECORDED, NOT IMPLEMENTED
 

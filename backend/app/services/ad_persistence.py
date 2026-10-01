@@ -310,19 +310,25 @@ def _persist_one(
         last_status_run_id=run_id,
     )
 
-    # S2.4: promote the record's media references into rows, in the same
-    # transaction as the snapshot. A failure here rolls the snapshot back with it,
-    # so a link can never outlive the observation that justifies it.
+    # S2.4: record the record's media references, in the same transaction as the
+    # snapshot. A failure here rolls the snapshot back with it, so a link can never
+    # outlive the observation that justifies it.
     #
-    # This runs on *every* observation, not only when a snapshot was created. An
-    # unchanged ad seen again is still a fresh observation of its assets, and
-    # `last_seen_at` has to move -- an asset's recency is a fact about the run, not
-    # about when the copy last changed.
+    # The asset upsert runs on *every* observation, not only when a snapshot was
+    # created. An unchanged ad seen again is still a fresh observation of its
+    # assets, and `last_seen_at` has to move -- an asset's recency is a fact about
+    # the run, not about when the copy last changed.
+    #
+    # The *link* is written only when a snapshot was created, because a link states
+    # what one immutable snapshot contained. On an unchanged observation the links
+    # already exist and their `position` must keep describing the order that
+    # snapshot was created with -- see `media_references`' module docstring.
     link_snapshot_media(
         session,
         provider=provider,
         ad_snapshot_id=snapshot_id,
         media=record.media,
+        snapshot_created=created_snapshot,
     )
 
     return PersistedObservation(

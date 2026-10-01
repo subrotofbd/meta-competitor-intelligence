@@ -37,7 +37,9 @@ from app.models.runs import (
 from app.providers.data.models import AdFormat, MediaRef, RawAdRecord
 from app.providers.data.provenance import DataOrigin
 from app.services.ad_persistence import ObservedRecord, persist_observations
+from app.services.content_hash import content_hash_v1
 from app.services.creative_hash import creative_hash_v1
+from app.services.media_references import link_snapshot_media
 
 pytestmark = pytest.mark.integration
 
@@ -686,18 +688,19 @@ def test_first_seen_at_survives_a_deliberately_wrong_value(db_session: Session) 
     assert _assets(db_session)[0].last_seen_at >= BASE, "last_seen_at did not advance"
 
 
-def test_position_follows_a_provider_reorder_of_the_same_snapshot(db_session: Session) -> None:
-    """A reordered media tuple re-derives `position` on the snapshot it already has.
+def test_a_provider_reorder_does_not_rewrite_an_existing_position(db_session: Session) -> None:
+    """A reordered media tuple must NOT move the positions of an existing snapshot.
 
-    This is the case that makes `position` worth updating rather than writing once.
+    This is the case that decides whether `position` can be re-derived at all.
     `content_hash` v1 **sorts** media keys, so a provider that reshuffles its media
     tuple produces an identical digest and therefore **the same snapshot** -- no new
-    evidence row is warranted, because the ad genuinely did not change. The links
-    are then re-derived against provider order, and the ordinal must follow.
+    evidence row is warranted, because the ad genuinely did not change.
 
-    Writing `position` only on insert would leave every row describing the order
-    from whichever observation happened to arrive first, which is a claim about
-    this snapshot's content and would simply be stale.
+    That is exactly why `position` must be frozen. `ad_snapshots.normalized` is
+    append-only and still holds the order the snapshot was created with; re-deriving
+    `position` from a later, reordered observation would leave two tables making
+    contradictory claims about one immutable snapshot. The snapshot's own stored
+    order wins, so the link must agree with it.
     """
     page_id = _page(db_session, "100000000000426")
     forward = (MediaRef(provider_key="ord-a"), MediaRef(provider_key="ord-b"))
@@ -708,8 +711,8 @@ def test_position_follows_a_provider_reorder_of_the_same_snapshot(db_session: Se
         page_id=page_id,
         record=_record(media=forward),
     )
-    before = _positions(db_session)
-    assert before == {"ord-a": 0, "ord-b": 1}
+    captured = _positions(db_session)
+    assert captured == {"ord-a": 0, "ord-b": 1}
 
     _second_ad, second_snapshot = _observe(
         db_session,
@@ -720,9 +723,191 @@ def test_position_follows_a_provider_reorder_of_the_same_snapshot(db_session: Se
     )
 
     assert second_snapshot.id == first_snapshot.id, "a reorder minted a new snapshot"
-    after = _positions(db_session)
-    assert after == {"ord-a": 1, "ord-b": 0}, "position did not follow provider order"
+    assert _positions(db_session) == captured, "a later observation rewrote position"
     assert len(_links(db_session)) == 2, "the reorder duplicated links"
+
+
+def test_position_agrees_with_the_normalized_json_of_its_own_snapshot(db_session: Session) -> None:
+    """The relational ordinal and the stored JSON describe the same thing.
+
+    Read as the invariant it is: for every link, `position` is the index of that
+    asset's `provider_key` inside its snapshot's own `normalized` media tuple. If
+    this ever fails, one of the two has been written from a different observation
+    than the other, and the snapshot's evidence has become ambiguous.
+    """
+    page_id = _page(db_session, "100000000000427")
+    media = (
+        MediaRef(provider_key="consist-c"),
+        MediaRef(provider_key="consist-a"),
+        MediaRef(provider_key="consist-b"),
+    )
+
+    _ad, snapshot = _observe(
+        db_session,
+        run=_run(db_session, page_id=page_id, offset_days=0),
+        page_id=page_id,
+        record=_record(media=media),
+    )
+
+    stored_order = [entry["provider_key"] for entry in snapshot.normalized["media"]]
+    assert stored_order == ["consist-c", "consist-a", "consist-b"], (
+        "the snapshot did not store provider order verbatim"
+    )
+
+    # Deliberately not provider_key order, so this can only pass if `position`
+    # really is the stored order rather than something alphabetically similar.
+    db_session.expire_all()
+    rows = db_session.execute(
+        select(AdSnapshotMedia.position, MediaAsset.provider_key)
+        .join(MediaAsset, MediaAsset.id == AdSnapshotMedia.media_asset_id)
+        .where(AdSnapshotMedia.ad_snapshot_id == snapshot.id)
+        .order_by(AdSnapshotMedia.position)
+    ).all()
+    assert [key for _position, key in rows] == stored_order
+    assert [position for position, _key in rows] == [0, 1, 2]
+
+
+def test_position_is_written_once_and_never_rewritten(db_session: Session) -> None:
+    """The locked rule, pinned at the public boundary.
+
+    `link_snapshot_media` is called again for a snapshot that already has links,
+    carrying a different provider order -- the shape a re-entrant or otherwise
+    conflicting write would take. The existing `position` must survive it.
+
+    This is deliberately a second line of defence rather than a restatement of the
+    previous test. Gating the link write on `snapshot_created` already prevents a
+    later *observation* from reaching the link at all, so with that gate in place
+    the conflict arm of the upsert is unreachable in production. It is kept because
+    the rule is stronger than "the caller behaves": one row, one position, written
+    once. This test is what stops that second defence from being quietly removed,
+    which the observation-level tests above would not notice.
+    """
+    page_id = _page(db_session, "100000000000429")
+    forward = (MediaRef(provider_key="once-a"), MediaRef(provider_key="once-b"))
+
+    _ad, snapshot = _observe(
+        db_session,
+        run=_run(db_session, page_id=page_id, offset_days=0),
+        page_id=page_id,
+        record=_record(media=forward),
+    )
+    captured = _positions(db_session)
+    assert captured == {"once-a": 0, "once-b": 1}
+
+    link_snapshot_media(
+        db_session,
+        provider=PROVIDER,
+        ad_snapshot_id=snapshot.id,
+        media=tuple(reversed(forward)),
+        snapshot_created=True,
+    )
+    db_session.flush()
+
+    assert _positions(db_session) == captured, "a second link write rewrote position"
+    assert len(_links(db_session)) == 2, "the second write duplicated links"
+
+
+def test_an_unchanged_observation_manufactures_no_link_for_a_pre_s24_snapshot(
+    db_session: Session,
+) -> None:
+    """A snapshot from before S2.4 gains asset recency but never a backfilled link.
+
+    The snapshot here is built by hand with the *real* `content_hash` for the record
+    the next observation will carry, so that observation matches it and resolves to
+    this pre-existing snapshot. That is the case the "links only when a snapshot is
+    created" gate exists for: manufacturing links for a snapshot nobody re-created
+    would write history S2.4 was told not to write, and would attach an order taken
+    from a *later* observation to a snapshot whose own `normalized` order came from
+    an earlier one.
+
+    The asset row still appears, because the asset genuinely was observed again.
+    """
+    page_id = _page(db_session, "100000000000430")
+    ad = _ad(db_session, "pre-s24-ad")
+    record = _record(external_ad_id="pre-s24-ad", media=(MediaRef(provider_key="pre-s24-media"),))
+    run = _run(db_session, page_id=page_id, offset_days=0)
+
+    call = ProviderRun(
+        collection_run_id=run.id,
+        status=ProviderRunStatus.SUCCEEDED,
+        started_at=run.started_at,
+        finished_at=run.finished_at,
+        request_meta={
+            "provider": PROVIDER,
+            "origin": DataOrigin.third_party.value,
+            "country": "IN",
+            "requested_at": (run.started_at or BASE).isoformat(),
+            "cursor": None,
+        },
+        http_status=200,
+    )
+    db_session.add(call)
+    db_session.flush()
+    response = RawResponse(provider_run_id=call.id, payload={"ads": []})
+    db_session.add(response)
+    db_session.flush()
+
+    # A snapshot exactly as S2.1 would have written it, before S2.4 existed.
+    legacy = AdSnapshot(
+        ad_id=ad.id,
+        collection_run_id=run.id,
+        raw_ref=response.id,
+        content_hash=content_hash_v1(record),
+        copy_hash=None,
+        creative_hash=None,
+        normalized=record.model_dump(mode="json"),
+    )
+    db_session.add(legacy)
+    db_session.flush()
+    ad.latest_snapshot_id = legacy.id
+    db_session.add(SeenInRun(ad_id=ad.id, collection_run_id=run.id, snapshot_id=legacy.id))
+    db_session.flush()
+    db_session.commit()
+
+    # Re-observe the identical record in a later run.
+    _observed_ad, observed_snapshot = _observe(
+        db_session,
+        run=_run(db_session, page_id=page_id, offset_days=1),
+        page_id=page_id,
+        record=record,
+    )
+
+    assert observed_snapshot.id == legacy.id, "an identical record minted a new snapshot"
+    assert _links(db_session) == [], "a link was manufactured for a pre-S2.4 snapshot"
+    assert len(_assets(db_session)) == 1, "asset recency should still be recorded"
+    assert _assets(db_session)[0].last_seen_at is not None
+
+
+def test_a_changed_key_set_makes_a_new_snapshot_which_takes_new_positions(
+    db_session: Session,
+) -> None:
+    """Adding a key moves `content_hash`, so S2.1 writes a new snapshot and new ordinals.
+
+    The counterpart to the reorder case: a genuinely different media set is a
+    different creative and gets its own evidence row, so its positions are captured
+    fresh rather than being frozen onto the old snapshot.
+    """
+    page_id = _page(db_session, "100000000000428")
+    two = (MediaRef(provider_key="set-a"), MediaRef(provider_key="set-b"))
+
+    _ad_one, first_snapshot = _observe(
+        db_session,
+        run=_run(db_session, page_id=page_id, offset_days=0),
+        page_id=page_id,
+        record=_record(media=two),
+    )
+    assert _positions(db_session) == {"set-a": 0, "set-b": 1}
+
+    _ad_two, second_snapshot = _observe(
+        db_session,
+        run=_run(db_session, page_id=page_id, offset_days=1),
+        page_id=page_id,
+        # A new key at the front: the set changed, so the digest must change.
+        record=_record(media=(MediaRef(provider_key="set-new"), *two)),
+    )
+
+    assert second_snapshot.id != first_snapshot.id, "a new key did not make a snapshot"
+    assert _positions(db_session) == {"set-a": 1, "set-b": 2, "set-new": 0}
 
 
 def test_provider_order_is_preserved_in_position(db_session: Session) -> None:
@@ -943,30 +1128,46 @@ def test_the_append_only_trigger_is_untouched_by_s24(db_session: Session) -> Non
     db_session.rollback()
 
 
-def test_media_writes_touch_no_hash(db_session: Session) -> None:
-    """S2.4 changed no digest, and this pins the three that exist.
+def test_media_writes_leave_the_persisted_hashes_byte_for_byte_unchanged(
+    db_session: Session,
+) -> None:
+    """The digests *stored on the snapshot* survive the S2.4 media writes untouched.
 
-    `creative_hash` v1 in particular must remain a function of provider keys: a
-    media row appearing, being updated, or being re-observed cannot move it, or a
-    stored v1 value would stop meaning what it meant.
+    An earlier version of this test recomputed the three digests from the same
+    immutable `RawAdRecord` before and after the writes. That could not fail for
+    any reason: the hash functions are pure and the record is frozen, so the
+    assertion was true no matter what the media path did. It is replaced here by
+    the claim actually worth making -- the values **persisted in the
+    `ad_snapshots` row** are unchanged after media rows are written and the ad is
+    re-observed.
+
+    Reading the row back is what makes it a real test: a future writer that
+    recomputed a digest from the current observation, or that updated a snapshot
+    while touching media, would be caught here and would not have been caught
+    before.
     """
-    from app.services.content_hash import content_hash_v1
-    from app.services.copy_hash import copy_hash_v1
-
-    record = _record(media=(MediaRef(provider_key="hashed"),))
-    before = (
-        content_hash_v1(record),
-        copy_hash_v1(record),
-        creative_hash_v1(record),
-    )
-
     page_id = _page(db_session, "100000000000423")
-    _observe(
+    record = _record(media=(MediaRef(provider_key="hashed"),))
+
+    _ad, snapshot = _observe(
         db_session,
         run=_run(db_session, page_id=page_id, offset_days=0),
         page_id=page_id,
         record=record,
     )
+
+    def stored_hashes() -> tuple[str, str | None, str | None]:
+        """The three digests as they exist in the database right now."""
+        db_session.expire_all()
+        row = db_session.get(AdSnapshot, snapshot.id)
+        assert row is not None
+        return row.content_hash, row.copy_hash, row.creative_hash
+
+    before = stored_hashes()
+    assert all(before), "the snapshot stored no digests to protect"
+
+    # Re-observe the same ad in a later run: asset recency advances, no new
+    # snapshot is written, and this is the path most likely to touch a row.
     _observe(
         db_session,
         run=_run(db_session, page_id=page_id, offset_days=1),
@@ -974,13 +1175,8 @@ def test_media_writes_touch_no_hash(db_session: Session) -> None:
         record=record,
     )
 
-    after = (
-        content_hash_v1(record),
-        copy_hash_v1(record),
-        creative_hash_v1(record),
-    )
-    assert after == before
-    assert before[2] == creative_hash_v1(record), "creative_hash moved when media rows appeared"
+    assert stored_hashes() == before, "a media write changed a persisted digest"
+    assert len(_assets(db_session)) == 1, "the media rows this run should still exist"
 
 
 # ============================================================
