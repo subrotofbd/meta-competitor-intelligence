@@ -119,6 +119,11 @@ ignore = [
 # name says what happened rather than where it happened. Renaming it to
 # `...Error` would say less about the condition than the name does.
 "**/app/services/ad_csv.py" = ["N818"]
+# `SeedRefused` is raised by `scripts/seed_demo.py` when the script declines to run --
+# APP_ENV=prod, or the queue handed back work that is not the demo's. Same reasoning
+# as `CsvExportTooLarge`: the name says what happened rather than where it happened,
+# and `...Error` would say less about the condition than the name does.
+"**/scripts/seed_demo.py" = ["N818"]
 "**/app/services/jobs.py" = ["N818"]
 
 [tool.ruff.lint.isort]

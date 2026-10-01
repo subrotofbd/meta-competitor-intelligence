@@ -2446,3 +2446,130 @@ collection path. That step also has to re-key `tests/fixtures/ai/analyses.json` 
 the **real computed** `copy_hash`, because the three placeholder keys cannot satisfy
 `ad_analysis.copy_hash`'s 64-hex `CHECK` and would otherwise yield all-null
 interpretations.
+
+---
+
+## 2026-10-02, S3.3 step 2 -- safe demo seed path
+
+Backend/scripting only. **The frontend is not started.** The AI fixture re-keying is
+also not started, and `analyses.json` was not touched.
+
+**`scripts/seed_demo.py`.** Creates only a `Competitor` and three `FacebookPage` rows
+itself -- both operator configuration rather than collected data -- and then drives
+`build_mock_pages()` -> `build_collection_orchestrator()` -> `schedule_collection` ->
+`queue.claim()` -> `execute_collection_job`, which is the same entry point
+`python -m worker` calls. No persistence logic is duplicated: the job-to-run linkage
+is read out of the claimed job's payload exactly as `worker/__main__.py` does, because
+re-deriving it from a query would be a second implementation of the same rule.
+
+**Verified by hand, end to end**: 9 ad records across 3 pages produced 8 `ads`, 8
+`ad_snapshots`, 8 `ad_status_by_context`, 8 `media_assets`, 9 `ad_snapshot_media` and
+33 `provider_runs` / `raw_responses`. The corpus deliberately repeats `mock-ad-000101`
+across two batches of one page, and the repeat collapsed to one ad -- the content-hash
+dedupe working, observed rather than assumed.
+
+### A pre-existing production bug, found because the seed had to work
+
+`composition.build_mock_pages()` passed the corpus's raw JSON `batches` straight into
+`MockPage`, so `MockPage.batches` held `dict` objects. Every `MockProvider.fetch_page_ads`
+call then died on `batch.raw` with `AttributeError: 'dict' object has no attribute 'raw'`,
+and `CollectionOrchestrator.execute_collection_job` swallowed it into
+`INTERNAL_ERROR_MESSAGE`. **The only code path that calls this function --
+`python -m worker` -- had therefore never run successfully against the mock provider.**
+It survived because `json.loads` returns `Any`, so mypy could not see the mismatch,
+and the tests never call it: they build their own corpus in `conftest.py`, which wraps
+the batches correctly. Fixed by constructing `MockBatch(...)`, as `conftest.py` does.
+
+### Two findings from getting the seed to work
+
+- **`schedule_collection` returns a marker, not a job id, when it short-circuits.**
+  If a PENDING or RUNNING run already exists for the page it returns
+  `"run-<id>"` and enqueues nothing. So the seed cannot rely on its return value to
+  identify its own job -- it drains the queue and matches on the payload instead.
+  Draining also surfaced terminal runs: executing an already-finished run is a no-op
+  reporting zero records, which reads exactly like a provider that served nothing.
+  Terminal runs are now skipped explicitly.
+- **`INTERNAL_ERROR_MESSAGE` promises "the worker log has the detail", and nothing
+  logs it.** `execute_collection_job` catches bare `Exception` and writes only the
+  generic pointer. The worker cannot help either, because the exception never escapes
+  the orchestrator. Every internal collection failure is currently undiagnosable from
+  the row and absent from the log. **Not fixed here** -- it is production behaviour in
+  S1.x code and outside this step's scope.
+
+### No `--with-ai`, and why
+
+The stored mock analyses are keyed `mock-copy-hash-en-001` and friends, while
+`ad_analysis.copy_hash` carries `CHECK (copy_hash ~ '^[0-9a-f]{64}$')`. Those keys can
+never be stored, so `MockAIProvider` would miss on every real digest and return its
+all-null analysis -- writing `ad_analysis` rows that read as "analysed" and say
+nothing, which is worse than no analysis. Re-keying the fixture by the real computed
+digest is a separate change and was not smuggled in. Asserted by
+`test_the_analysis_fixture_keys_could_never_be_stored` and
+`test_there_is_no_with_ai_flag_and_no_ai_import`.
+
+### The end-to-end test was written, run, and then removed
+
+It ran the real seed twice and compared counts. It worked, and it could **never be
+run again**: `ad_snapshots` is append-only and its trigger refuses `DELETE` as well as
+`UPDATE`, so a committed seed is permanent short of dropping the table or disabling
+the trigger. The demo rows are also visible to other suites -- `test_ad_persistence`
+counts `ads` inside its own transaction and sees committed ones. So the properties it
+covered are pinned hermetically instead: the two reuse tests cover duplicate
+competitor/Page creation, and snapshot idempotence is
+`test_ad_persistence.py`'s own "an unchanged observation in a later run writes no
+second snapshot". The `seed_live` marker was removed rather than left as a trap.
+
+### Safety
+
+Refuses `APP_ENV=prod` **before opening a connection** (asserted by replacing
+`get_engine` with a raiser). Everything is inside function bodies behind
+`if __name__ == "__main__"`, and an `ast` walk asserts no module-level statement can
+execute on import. No flags are registered. Logged through `app.core.logging` rather
+than `print`, matching `scripts/check_db.py`. No invented performance metric is
+possible: there is no column to write one, asserted against `information_schema`.
+
+**Idempotence.** Rerunning creates a new collection run -- real history -- and
+adds `seen_in_run` links, while `content_hash` dedupe means **no second snapshot** for
+any ad. Competitor reuse matches on name (the column is deliberately not unique);
+Page reuse matches on `page_id` (globally unique). Nothing is deleted or reset.
+
+### **Outstanding problem: the development database now holds unremovable demo rows**
+
+Diagnosing the `MockBatch` bug required running the seed for real. That committed
+**1 competitor, 3 pages, 8 ads, 8 ad_snapshots, 8 ad_status_by_context, 45 seen_in_run,
+8 media_assets, 9 ad_snapshot_media, 33 provider_runs, 33 raw_responses and 31
+collection_runs** to the development database.
+
+They **cannot be deleted.** `ad_snapshots` refuses `DELETE` via its append-only
+trigger, and `ads` is therefore blocked by the foreign key. Two narrowly-scoped
+cleanup attempts were made, both inside a transaction, both rolled back cleanly on the
+trigger's refusal; the database is intact and no destructive command was run.
+
+Consequence: **48 count-based tests are now red** -- 21 in `test_ad_persistence`,
+18 in `test_api_ads`, 5 in `test_api_competitors`, 3 in `test_collection_ordering`,
+1 in `test_collection_hardening`. They fail because they count rows and the
+committed demo rows are visible to them. `test_mock_provider`, `test_job_queue` and
+`test_db_session` are green, which independently confirms the `MockBatch` fix did not
+break those layers.
+
+**This needs a human decision.** The fix is to reset the development database
+(`docker compose down -v`, `up -d`, `alembic upgrade head`), which is a destructive
+action this session will not take unasked. Until then the suite is red for
+environmental reasons, not because of any code change in this step.
+
+**Known limitations**
+- No end-to-end automated test, by the reasoning above. The flow was verified by hand.
+- The corpus spans `IN`, `GB`, `IE` and `US`; only 6 of 9 ads include `IN`, and
+  `MockProvider` ignores the requested country. So `ad_status_by_context.country` is
+  the **run's** scope, not the ad's `targeted_countries`, which stays in `normalized`.
+  An earlier docstring claimed every ad targeted `IN` -- false, and corrected.
+- A foreign job is leased and skipped, never executed, completed or failed. Its lease
+  expires on its own, so this is recoverable rather than destructive, but this script
+  will re-lease such a job on every run.
+- The development database carries two pre-existing `pending` jobs whose payload is
+  the literal string `'same-run'` -- not a UUID, so they cannot resolve to a run.
+  They predate this step and were left alone.
+
+**Next step (not started, needs approval):** re-key `tests/fixtures/ai/analyses.json`
+by the real computed `copy_hash`, so the AI panel can be developed against real
+interpretations rather than an all-null one.

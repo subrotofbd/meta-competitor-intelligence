@@ -122,7 +122,7 @@ def build_mock_pages() -> Mapping[str, MockPage]:
     import json
     from pathlib import Path
 
-    from app.providers.data.mock import MockPage
+    from app.providers.data.mock import MockBatch, MockPage
     from app.providers.data.models import PageRef
 
     fixtures_path = (
@@ -140,7 +140,20 @@ def build_mock_pages() -> Mapping[str, MockPage]:
         reference = PageRef(**entry["page"])
         pages[reference.provider_page_id] = MockPage(
             page=reference,
-            batches=entry["batches"],
+            # **`MockBatch(...)`, not the raw dicts.** This handed the JSON straight
+            # through, so `MockPage.batches` held `dict` objects and every
+            # `fetch_page_ads` call died on `batch.raw` with
+            # `AttributeError: 'dict' object has no attribute 'raw'`.
+            #
+            # It survived because `json.loads` returns `Any`, so mypy could not see the
+            # mismatch, and the tests never exercised this function -- they build their
+            # own corpus in `conftest.py`, which wraps the batches correctly. So the
+            # one path that uses this function -- `python -m worker` -- had never run
+            # successfully against the mock provider. S3.3's seed hit it immediately.
+            batches=tuple(
+                MockBatch(raw=batch["raw"], next_cursor=batch["next_cursor"])
+                for batch in entry["batches"]
+            ),
         )
     return pages
 
