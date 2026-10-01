@@ -45,8 +45,20 @@ S1_TABLES = S11_TABLES | {"jobs"}
 #: cannot be derived from the thing it bounds.
 S21_TABLES = frozenset({"ads", "ad_snapshots", "seen_in_run"})
 
-#: The cumulative S2 scope, which is everything that exists after S2.1.
-S2_TABLES = S1_TABLES | S21_TABLES
+#: S2.2 adds **no tables at all**. It adds two nullable columns to
+#: `ad_snapshots` and two indexes, and nothing else.
+#:
+#: Pinned as an empty set so the boundary is still asserted. `ad_creatives` was
+#: considered and deferred: `app/providers/data/normalize.py::_read_body` reads
+#: only `bodies[0]` and flattens it, so the current normalized contract exposes no
+#: card-level structure and a per-card table would fabricate rows rather than
+#: record observations. `ad_platforms`, `ad_countries` and `landing_pages` are not
+#: S2.2 scope and must not be added because an older `ARCHITECTURE.md` lists them
+#: alongside `ad_creatives`. A non-empty set here means scope nobody approved.
+S22_TABLES: frozenset[str] = frozenset()
+
+#: The cumulative S2 scope, which is everything that exists after S2.2.
+S2_TABLES = S1_TABLES | S21_TABLES | S22_TABLES
 
 S11_MODELS = (Competitor, FacebookPage, CollectionRun, ProviderRun, RawResponse)
 

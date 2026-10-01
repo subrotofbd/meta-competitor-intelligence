@@ -31,10 +31,17 @@ from app.services.content_hash import (
     _DISPLAY_FORMAT_TOKENS,
     CONTENT_HASH_VERSION,
     _display_format_token,
-    _frame,
-    _frame_collection,
     content_hash_v1,
 )
+
+# The framing helpers moved to `app.services.hashing` in S2.2 so all three hashes
+# share one definition. They are imported from their new home rather than through
+# `content_hash`'s aliases, because they are no longer *this* module's private
+# business. Everything else in this file -- the field sets, the order, the
+# version, the independent recomputation, the exclusions -- is unchanged, and the
+# whole point of this file is that v1's output did not move.
+from app.services.hashing import frame as _frame
+from app.services.hashing import frame_collection as _frame_collection
 
 pytestmark = pytest.mark.unit
 

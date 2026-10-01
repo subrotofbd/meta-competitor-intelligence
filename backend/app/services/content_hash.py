@@ -7,6 +7,19 @@ time we saw it?* `AGENTS.md` section 8 makes the answer the sole condition for
 writing a new snapshot, so this function is the hinge of the whole history
 model. Everything else here follows from taking that one question seriously.
 
+## Still frozen in S2.2, and deliberately not redefined
+
+S2.2 added `copy_hash` and `creative_hash` as **sibling** digests, so that
+duplicate detection can group ads by words and by assets separately. It did
+**not** redefine this function as a composition of them, and an earlier
+`ARCHITECTURE.md` line claiming `content_hash = sha256(copy_hash +
+creative_hash + display_format + platforms)` was corrected rather than built.
+Every digest already written must keep meaning exactly what it meant -- that is
+the whole reason `CONTENT_HASH_VERSION` exists. The framing helpers moved to
+`app.services.hashing` in S2.2 so all three hashes share one definition; the
+output is byte-for-byte identical, and `backend/tests/test_content_hash.py` is
+what proves it.
+
 ## The rules that are not obvious
 
 **It is a pure function of a `RawAdRecord`,** and of nothing else -- not the
@@ -52,11 +65,18 @@ and S2.4. v1 is self-contained so that nothing in S2.1 depends on them.
 
 from __future__ import annotations
 
-import hashlib
-from collections.abc import Sequence
 from typing import Final
 
 from app.providers.data.models import AdFormat, RawAdRecord
+
+# The framing moved to `app.services.hashing` in S2.2 so that `copy_hash` and
+# `creative_hash` share one definition with this one. The private names are kept
+# as aliases because `backend/tests/test_content_hash.py` imports them directly
+# to pin v1's framing: that test is the proof this module's output did not
+# change, and it must keep passing without being edited.
+from app.services.hashing import digest as _digest
+from app.services.hashing import frame as _frame
+from app.services.hashing import frame_collection as _frame_collection
 
 #: Written into the hashed input, so a v1 digest can never be mistaken for a
 #: future version's digest over identical fields.
@@ -73,34 +93,6 @@ _DISPLAY_FORMAT_TOKENS: Final[dict[str, str]] = {
     "CAROUSEL": "carousel",
 }
 _UNMODELLED_DISPLAY_FORMAT: Final = "unmodelled"
-
-#: Joins framed values. Every value is already length-prefixed, so this cannot
-#: cause a collision on its own; it exists so that no two fields can ever be
-#: concatenated by accident.
-_SEPARATOR: Final = "\x1f"
-
-
-def _frame(value: str | None) -> str:
-    """One framed scalar: `-` for absent, `<byte-length>:<value>` otherwise.
-
-    The length is in **bytes**, not characters, because that is what gets
-    hashed. A character count would let a multi-byte string claim a length that
-    does not match its encoding, which is precisely the ambiguity this framing
-    exists to remove.
-    """
-    if value is None:
-        return "-"
-    return f"{len(value.encode('utf-8'))}:{value}"
-
-
-def _frame_collection(values: Sequence[str]) -> str:
-    """One framed collection, with its own count.
-
-    The count is what keeps `()` distinct from a one-element collection holding
-    an empty string -- and both distinct from an absent scalar, which frames as
-    `-`.
-    """
-    return f"[{len(values)}" + "".join(_frame(value) for value in values) + "]"
 
 
 def _display_format_token(display_format: AdFormat | None) -> str:
@@ -137,14 +129,15 @@ def content_hash_v1(record: RawAdRecord) -> str:
         _frame(record.headline),
         _frame(record.description),
         _frame(record.cta),
-        # The stored, validated URL. Canonicalisation is S2.2 and `landing_pages`
-        # is its table; v1 hashes what we actually hold.
+        # The stored, validated URL. v1 hashes what we actually hold, and S2.2
+        # deliberately did not add canonicalisation: `copy_hash` v1 hashes the
+        # same stored spelling so the two hashes cannot disagree about a URL.
         _frame(None if record.destination_url is None else str(record.destination_url)),
         _frame(_display_format_token(record.display_format)),
         _frame_collection(sorted(record.platforms)),
         # Provider media keys only. Bytes are S2.4; until they exist the key is
         # the asset's identity, which is ARCHITECTURE.md's own documented
-        # fallback.
+        # fallback. `creative_hash` v1 (S2.2) frames exactly this collection.
         _frame_collection(sorted(asset.provider_key for asset in record.media)),
     ]
-    return hashlib.sha256(_SEPARATOR.join(parts).encode("utf-8")).hexdigest()
+    return _digest(parts)

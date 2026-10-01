@@ -60,7 +60,7 @@ from datetime import datetime
 from typing import Any
 
 import sqlalchemy as sa
-from sqlalchemy import CheckConstraint, ForeignKey, UniqueConstraint
+from sqlalchemy import CheckConstraint, ForeignKey, Index, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -218,7 +218,34 @@ class AdSnapshot(Base, UuidPrimaryKeyMixin, TimestampMixin):
 
     #: The S2.1 v1 comparison digest (`services.content_hash`). A new snapshot is
     #: written only when this differs from the current one.
+    #:
+    #: **Frozen.** S2.2 did not redefine this as a composition of `copy_hash` and
+    #: `creative_hash`, and an earlier `ARCHITECTURE.md` line saying so was
+    #: corrected rather than built: every digest already written must keep meaning
+    #: what it meant, which is the whole reason the version literal exists.
     content_hash: Mapped[str] = mapped_column(sa.String(64), nullable=False)
+
+    #: The S2.2 copy digest (`services.copy_hash`): this ad's words alone.
+    #:
+    #: **Nullable, and NULL means "recorded before S2.2".** It is not a default
+    #: and not a backfill: `ad_snapshots` is append-only, so a row written before
+    #: this column existed can never be enriched -- an `UPDATE` is refused by the
+    #: append-only trigger. That is the same trade S2.1 made for
+    #: `content_hash` and it is the price of never rewriting history.
+    #:
+    #: Siblings of `content_hash`, not inputs to it. Duplicate detection groups on
+    #: this to answer "do these two ads say the same thing?", which
+    #: `content_hash` cannot answer because it hashes words and assets together.
+    copy_hash: Mapped[str | None] = mapped_column(sa.String(64), nullable=True)
+
+    #: The S2.2 creative digest (`services.creative_hash`): this ad's provider
+    #: media keys. An *identity* fallback, not a content digest -- media bytes are
+    #: S2.4, and `AGENTS.md` section 12 forbids byte downloads in S0-S3. Two ads
+    #: re-served under a rotated key look different to this value, so a creative
+    #: duplicate is a hint rather than proof.
+    #:
+    #: Nullable for the same reason and with the same meaning as `copy_hash`.
+    creative_hash: Mapped[str | None] = mapped_column(sa.String(64), nullable=True)
 
     #: The provider's own status wording, untranslated. Not our status: nothing
     #: derives `provider_active` until S2.3.
@@ -246,6 +273,23 @@ class AdSnapshot(Base, UuidPrimaryKeyMixin, TimestampMixin):
         # impossible to get wrong rather than merely discouraged.
         UniqueConstraint("ad_id", "collection_run_id", name="uq_ad_snapshots_ad_run"),
         sa.CheckConstraint(_CONTENT_HASH_CHECK, name="content_hash_is_sha256_hex"),
+        # The S2.2 digests, checked by the same expression as the S2.1 one. A
+        # malformed digest would not fail loudly -- it would make every future
+        # comparison unequal, so no snapshot would ever be written again, and
+        # duplicate detection would silently stop finding anything. The same
+        # expression also accepts NULL, because a `CHECK` is satisfied unless it
+        # evaluates to FALSE and a regex yields NULL for NULL: which is exactly
+        # the behaviour a pre-S2.2 row needs, and needs no `IS NULL OR` guard.
+        sa.CheckConstraint(_CONTENT_HASH_CHECK, name="copy_hash_is_sha256_hex"),
+        sa.CheckConstraint(_CONTENT_HASH_CHECK, name="creative_hash_is_sha256_hex"),
+        # Both exist for one access pattern each, named so the reason is
+        # recorded next to the index rather than only in a query: grouping
+        # snapshots by digest to find ads sharing copy, and by digest to find ads
+        # sharing assets. Plain, not partial -- a partial index is not reliably
+        # compared by autogenerate, and phantom drift from one is a worse cost
+        # than the handful of NULL rows it would save.
+        Index("ix_ad_snapshots_copy_hash", "copy_hash"),
+        Index("ix_ad_snapshots_creative_hash", "creative_hash"),
     )
 
 

@@ -1284,6 +1284,192 @@ def test_a_run_that_read_no_ad_writes_nothing(db_session: Session) -> None:
 # ============================================================
 
 
+def test_a_new_snapshot_carries_both_s22_digests(db_session: Session) -> None:
+    """The two S2.2 columns are written at INSERT, by the real hash functions.
+
+    Read straight off the stored row and compared with the functions themselves,
+    so a change to either hash contract surfaces here rather than as a duplicate
+    report that quietly finds nothing.
+    """
+    from app.services.copy_hash import copy_hash_v1
+    from app.services.creative_hash import creative_hash_v1
+
+    run, response = _chain(db_session)
+    record = _record()
+
+    result = _persist(db_session, run, [_observed(record, response)])[0]
+    snapshot = _get(db_session, AdSnapshot, result.snapshot_id)
+
+    assert snapshot.copy_hash == copy_hash_v1(record)
+    assert snapshot.creative_hash == creative_hash_v1(record)
+    # And the frozen S2.1 digest is still there, still v1, untouched.
+    assert snapshot.content_hash == content_hash_v1(record)
+    assert len(snapshot.content_hash) == 64
+
+
+def test_a_pre_s22_snapshot_keeps_null_digests_and_is_never_backfilled(
+    db_session: Session,
+) -> None:
+    """`NULL` means "recorded before S2.2", permanently.
+
+    The table is append-only, so a row that predates the columns can never be
+    given a digest -- an `UPDATE` is refused by the trigger. That is the same
+    trade S2.1 made for `content_hash`, and asserting it here is what stops a
+    later session from adding a backfill that would either fail on the trigger or
+    fabricate a value nobody observed.
+    """
+    run, response = _chain(db_session)
+    ad = _an_ad(db_session, run, response)
+    later_run = _another_run(db_session, response)
+    later_response = second_response_of(db_session, later_run)
+
+    legacy = AdSnapshot(
+        ad_id=ad.id,
+        collection_run_id=later_run.id,
+        raw_ref=later_response.id,
+        content_hash="0" * 64,
+        normalized={"external_ad_id": "ad-0001"},
+    )
+    db_session.add(legacy)
+    db_session.flush()
+
+    assert legacy.copy_hash is None
+    assert legacy.creative_hash is None
+
+    with pytest.raises(IntegrityError) as caught:
+        db_session.execute(
+            text("UPDATE ad_snapshots SET copy_hash = :digest WHERE id = :id"),
+            {"digest": "1" * 64, "id": legacy.id},
+        )
+    assert "append-only" in str(caught.value)
+    db_session.rollback()
+
+
+def test_a_changed_creative_with_unchanged_copy_appends_a_snapshot(
+    db_session: Session,
+) -> None:
+    """The proof that the new split is actually used rather than decorative.
+
+    Identical words, different media. `content_hash` v1 covers words *and*
+    assets, so the change decision is already made by the existing S2.1 rule --
+    no second comparison was added, and none should be, because two comparisons
+    that could disagree would be worse than one. This asserts the end-to-end
+    consequence: a creative-only change is caught, and the new `creative_hash`
+    column records the difference the old one absorbed.
+    """
+    first_run, first_response = _chain(db_session)
+    first = _persist(
+        db_session,
+        first_run,
+        [_observed(_record(media=(MediaRef(provider_key="img-1"),)), first_response)],
+    )[0]
+
+    second_run = _another_run(db_session, first_response)
+    second_raw = second_response_of(db_session, second_run)
+    second = _persist(
+        db_session,
+        second_run,
+        [
+            _observed(
+                _record(media=(MediaRef(provider_key="img-1"), MediaRef(provider_key="img-2"))),
+                second_raw,
+            )
+        ],
+    )[0]
+
+    original = _get(db_session, AdSnapshot, first.snapshot_id)
+    updated = _get(db_session, AdSnapshot, second.snapshot_id)
+
+    assert _count(db_session, AdSnapshot) == 2
+    assert second.created_snapshot is True
+    assert updated.id != original.id
+    # The copy did not change, so its digest did not...
+    assert updated.copy_hash == original.copy_hash
+    # ...and the creative did, so its digest did. That asymmetry is the whole
+    # reason the two columns exist.
+    assert updated.creative_hash != original.creative_hash
+
+
+def test_a_changed_copy_with_unchanged_creative_appends_a_snapshot(
+    db_session: Session,
+) -> None:
+    """The mirror image, from the copy side."""
+    first_run, first_response = _chain(db_session)
+    first = _persist(db_session, first_run, [_observed(_record(), first_response)])[0]
+
+    second_run = _another_run(db_session, first_response)
+    second_raw = second_response_of(db_session, second_run)
+    second = _persist(
+        db_session,
+        second_run,
+        [_observed(_record(primary_text="Different words"), second_raw)],
+    )[0]
+
+    original = _get(db_session, AdSnapshot, first.snapshot_id)
+    updated = _get(db_session, AdSnapshot, second.snapshot_id)
+
+    assert _count(db_session, AdSnapshot) == 2
+    assert updated.copy_hash != original.copy_hash
+    assert updated.creative_hash == original.creative_hash
+
+
+def test_unchanged_content_still_writes_no_snapshot_and_no_digests(
+    db_session: Session,
+) -> None:
+    """S2.1's core rule is unchanged by the two new columns.
+
+    A re-observation of identical content must still write no snapshot -- and so
+    must write no new digests, because the digests live on the snapshot. If a
+    session started persisting them on the ad or on the link row instead, an
+    unchanged ad would accumulate a row per run, which is the bloat
+    `content_hash` was introduced to prevent.
+    """
+    first_run, first_response = _chain(db_session)
+    _persist(db_session, first_run, [_observed(_record(), first_response)])
+
+    second_run = _another_run(db_session, first_response)
+    second_raw = second_response_of(db_session, second_run)
+    _persist(db_session, second_run, [_observed(_record(), second_raw)])
+
+    assert _count(db_session, AdSnapshot) == 1
+    assert _count(db_session, SeenInRun) == 2
+
+
+def test_the_latest_snapshot_pointer_moves_for_a_creative_only_change(
+    db_session: Session,
+) -> None:
+    """S2.1's pointer rule, exercised through the new split.
+
+    A creative-only change is a content change, so `latest_snapshot_id` must move
+    onto the new snapshot exactly as it would for a copy change. The pointer means
+    "this is the ad's current state", and the current state's assets changed.
+    """
+    first_run, first_response = _chain(db_session)
+    first = _persist(
+        db_session,
+        first_run,
+        [_observed(_record(media=(MediaRef(provider_key="img-1"),)), first_response)],
+    )[0]
+
+    second_run = _another_run(db_session, first_response)
+    second_raw = second_response_of(db_session, second_run)
+    second = _persist(
+        db_session,
+        second_run,
+        [
+            _observed(
+                _record(media=(MediaRef(provider_key="img-1"), MediaRef(provider_key="img-2"))),
+                second_raw,
+            )
+        ],
+    )[0]
+
+    ad = _get(db_session, Ad, first.ad_id)
+
+    assert ad.latest_snapshot_id == second.snapshot_id
+    assert ad.latest_snapshot_id != first.snapshot_id
+
+
 def _the_ad(db_session: Session) -> Ad:
     return db_session.execute(select(Ad)).scalar_one()
 

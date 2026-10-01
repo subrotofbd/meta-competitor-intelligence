@@ -1308,3 +1308,179 @@ and `test_no_trigram_or_text_index_exists_yet` was **re-run and extended** in th
 precisely so a later one cannot add one without noticing. `copy_hash` and `creative_hash` arrive
 as new columns, and the stored v1 `content_hash` values keep meaning exactly what they meant.
 Do not start without explicit human approval.
+
+---
+
+## 2026-10-01, Checkpoint S2.2 -- Copy/Creative Digests + Duplicate Detection (COMPLETE)
+
+**S2.2 is complete and READY TO COMMIT. S2.3 and S2.4 have NOT started.** Nothing in this entry
+may be read as covering either of them.
+
+### 1. What was built
+
+S2.2 added **no tables at all**. It extended `ad_snapshots` with two nullable columns and built
+the write path and the query that make them useful.
+
+- **`copy_hash` v1** (`backend/app/services/copy_hash.py`, `s2.2-copy-v1`) -- the ad's *words*
+  only: `primary_text`, `headline`, `description`, `cta`, `destination_url`, in that order, each
+  length-prefix framed. Excluded, each with a stated reason: `external_ad_id` (identity),
+  `ad_status` and `meta_delivery_start` (a status flip or a corrected date must not rewrite
+  history), `page_id`/`page_name` (attribution), `countries` (targeting), `display_format` and
+  `media` (the creative, hashed separately), `platforms` (delivery), `provider_metadata`.
+- **`creative_hash` v1** (`backend/app/services/creative_hash.py`, `s2.2-creative-v1`) --
+  `media[].provider_key` only, **sorted for the hash representation and nowhere else**. The
+  stored `normalized` JSON keeps provider order and the record is never mutated.
+- **Shared framing** (`backend/app/services/hashing.py`) -- `frame`, `frame_collection`, `digest`
+  and the `\x1f` separator, now defined **once** for all three hashes rather than three times.
+  `content_hash.py` was refactored to import from it.
+- **Duplicate detection** (`backend/app/services/duplicate_detection.py`) -- groups snapshots by
+  `copy_hash` and by `creative_hash` through two symmetric query helpers.
+- **Two plain indexes** on `ad_snapshots (copy_hash)` and `(creative_hash)`, each for one named
+  access pattern.
+
+### 2. The value this actually adds
+
+`content_hash` v1 already detects identical ads, because it hashes words and assets together.
+The split exists so a match can be **attributed**: "these two ads say the same thing" and "these
+two ads use the same assets" are different findings with different implications, and one digest
+cannot answer both. The commonest real duplicate -- identical words over different images -- is
+invisible to v1 alone.
+
+### 3. Migration
+
+**`0006_s2_2_hashes`**, extending `0005_ads_data_origin_check`. Single linear head, six
+operations, **all additive**: two `add_column` (`nullable=True`, no default, no backfill), two
+`create_check_constraint`, two `create_index`. No `UPDATE`, no `TRUNCATE`, no `DROP`, no reset, no
+downgrade executed. The `CHECK` expression is **byte-identical to S2.1's**, and accepts `NULL`
+without an `IS NULL OR` guard because a `CHECK` is satisfied unless it evaluates to `FALSE` and a
+regex yields `NULL` for `NULL`.
+
+`NULL` therefore carries a meaning: **this observation predates S2.2**. It is never a default and
+never a computed placeholder, and it is permanent -- `ad_snapshots` is append-only, so a pre-S2.2
+row can never be backfilled, and an `UPDATE` is refused by the trigger. That is the same trade
+S2.1 made for `content_hash`, and it is the price of never rewriting history.
+
+`downgrade()` drops indexes, then checks, then columns -- the only order in which each object
+still exists -- and is rendered offline only, never run.
+
+**Before the migration was authored, `ads`, `ad_snapshots` and `seen_in_run` were each verified
+to hold 0 rows.** They still hold 0 rows. The nullable design is what would keep the migration
+non-destructive if that were not true, which is why it is the design rather than a convenience.
+
+### 4. S2.1 `content_hash` v1 -- unchanged
+
+**Byte-for-byte unchanged, and no stored digest was recomputed.** The only functional line that
+moved across the whole checkpoint is
+`hashlib.sha256(_SEPARATOR.join(parts).encode("utf-8")).hexdigest()` becoming `_digest(parts)`,
+and `hashing.digest()` is that exact expression with the same `SEPARATOR = "\x1f"`. Field order,
+`CONTENT_HASH_VERSION = "s2.1-content-v1"`, exclusions, sorting, display-format token behaviour,
+`None`/empty semantics and Unicode behaviour are all untouched. `test_content_hash.py`'s 51 tests
+pass unchanged and are the proof.
+
+An earlier `ARCHITECTURE.md` line claimed `content_hash = sha256(copy_hash + creative_hash +
+display_format + platforms)`. That was **never built and was corrected, not implemented**: the two
+new hashes are *siblings* of `content_hash`, not inputs to it, and making it a composition would
+either rewrite history or force a v2 of a contract S2.1 froze deliberately. `ARCHITECTURE.md`
+lines 79-118 and the Creative archive section now match what shipped.
+
+### 5. Persistence
+
+Both hashes are written **only** inside the `AdSnapshot(...)` construction, so only when a new
+snapshot is inserted. No existing snapshot is ever enriched. The change decision still compares
+`content_hash` alone -- deliberately, because it already covers words *and* assets, so a
+creative-only change is caught by the existing S2.1 rule and no second comparison exists that
+could disagree with it. The two columns exist to be *queried*, not to decide when to write.
+
+S2.1 semantics re-proven through the new split: unchanged content writes no snapshot and no
+digests; a copy-only change and a creative-only change each append exactly one snapshot and move
+`latest_snapshot_id`; the raw-before-normalize transaction boundary is untouched.
+
+### 6. Duplicate detection semantics
+
+Identity is **the digest, never a `UNIQUE` constraint** -- two competitors running identical
+copy is a finding, not a violation, and a uniqueness constraint would forbid the observation
+worth having. Three rules the queries must not get wrong, each with a test:
+
+- **`IS NOT NULL` is mandatory.** Every pre-S2.2 row carries `NULL` in both columns. Without the
+  filter they would land in one NULL bucket and every pre-S2.2 ad would be reported as a
+  duplicate of every other pre-S2.2 ad -- a spectacularly wrong answer shaped like a result.
+- **`DISTINCT` on the ad, never a row count.** One ad accumulates snapshots over time, which is
+  what the history model is *for*; counting rows would report it as a duplicate of itself, on
+  every collection, for ever.
+- **No competitor or page attribution.** That needs the
+  `seen_in_run` -> `collection_run` -> `facebook_page` -> `competitor` join and is an API
+  concern. Deferred: a group that cannot yet say *whose* ad it is is still a correct answer to
+  the question this module asks, whereas a guessed attribution would not be.
+
+### 7. Validation
+
+| Check | Result |
+|---|---|
+| Targeted S2.2 tests (7 files) | **283 passed** |
+| Full backend suite | **798 passed** |
+| `ruff check backend` | All checks passed |
+| `ruff format --check backend` | 70 files already formatted |
+| `mypy` (project config, `packages = ["app"]`, strict) | Success, 39 source files |
+| `mypy backend` (adds tests) | **61 pre-existing errors in 15 files, zero in any S2.2 file** |
+| `alembic current` / `heads` | `0006_s2_2_hashes`, single head |
+| `alembic check` | No new upgrade operations detected |
+
+**Mutation-verified.** Two deliberate regressions were each caught and the implementation
+restored: inverting the content-change comparison fails
+`test_a_changed_creative_with_unchanged_copy_appends_a_snapshot`; removing the duplicate query's
+`IS NOT NULL` filter fails `test_a_group_cannot_be_composed_of_nulls`. Worth recording that the
+*single*-row NULL test passes either way -- one NULL row cannot form a group -- so only the
+two-row test detects that mutation. Both exist for that reason.
+
+Six test-authoring bugs of my own were found and fixed during this checkpoint, all in test code:
+a wrong `_frame("")` expectation, `local_remote_pairs` indexing, a blanket FK loop contradicting
+the intentional `latest_snapshot_id`, a colliding `page_id`, two orphan-FK tests that could pass
+for the wrong constraint, and a duplicate-detection test whose two ads shared a media key.
+
+### 8. Known limitations
+
+- **Pre-S2.2 snapshots keep `NULL` for ever.** Append-only means they can never be enriched. Same
+  shape as v1 `content_hash` values retaining their original meaning.
+- **`creative_hash` v1 is a provider-key *identity*, not a content digest.** `AGENTS.md` section
+  12 forbids media byte downloads in S0-S3, so two ads re-served under a rotated key look
+  different to it. **A creative duplicate is a hint, not proof.** S2.4's byte hashing becomes
+  **v2** and reinterprets no stored `s2.2-creative-v1` value.
+- **`ad_creatives` and card-level modelling are deferred.** The normalized contract exposes no
+  card-level structure: `_read_body` reads only `bodies[0]` and flattens it, and the committed
+  corpus holds nine ads, every one single-bodied. A per-card table built now would fabricate rows
+  rather than record observations. Building it needs a **normalizer change first**, which is its
+  own checkpoint. `ad_platforms`, `ad_countries` and `landing_pages` are also deferred; `media_assets`
+  is S2.4. `backend/app/models/__init__.py` now states the real S2.2 scope in its checkpoint list
+  and carries the old five-table claim only as an explicitly labelled SUPERSEDED note.
+- **URL canonicalisation is deferred.** `copy_hash` v1 hashes `destination_url` exactly as
+  validated and stored -- no canonicalisation, rewriting, case folding or query reordering.
+  `landing_pages` does not exist, so there is nowhere to hold a canonical form, and a digest that
+  moved because *we* tidied the URL would claim the provider had changed something it had not.
+- **No competitor or page attribution for duplicate groups.** Deferred to a later checkpoint.
+- **`mypy backend` has 61 pre-existing errors** in S0.3/S1.x test files. This is the recorded
+  baseline, not a regression: S2.2 contributes **zero**. The project gate is the `mypy` project
+  config, which is clean. Cleaning the test-file baseline is separate work.
+- **Windows `TEMP`/`TMP`: 11 pre-existing `PermissionError` errors** in
+  `backend/tests/test_media_store.py` and `backend/tests/test_offline_guard.py` under the default
+  `C:\Users\DELL\AppData\Local\Temp\pytest-of-DELL`. **An environment issue in `tmp_path`
+  resolution, not an S2.2 defect**, and those S0.3 tests must not be modified to hide it. The
+  suite is green with `TEMP`/`TMP` pointed at `C:\Users\DELL\AppData\Local\Temp\opencode`. Anyone
+  counting the suite on this machine must set those two variables or expect those 11 errors.
+- **Integration tests require the PostgreSQL container** and are not skipped when it is down.
+- **No real provider exists.** Every run has been against `MockProvider` and the committed corpus.
+  Nothing has met Meta or a third party. No API, no auth, no frontend.
+
+### 9. Future note, not a defect and not changed in this checkpoint
+
+`DuplicateGroup.content_hash` is the field name for the group key, and on `axis="creative"` it
+holds a *creative* digest. That is functionally correct and its docstring says "digest", but the
+field name is a legacy of the copy-first framing. Recorded here for a future checkpoint to decide;
+**no change was made**, because renaming a public field mid-checkpoint for a naming preference is
+not justified by any failing test.
+
+### 10. Next checkpoint: S2.3 -- NOT STARTED
+
+`ads.current_status` and the `provider_active` / `not_seen_since` / `presumed_inactive` state
+machine, which counts N **consecutive complete** runs and must never fire after a failed or
+partial one. Nothing in S2.3 is started. `S2.4` (media bytes, `media_assets`) is likewise not
+started. Do not begin either without explicit human approval.

@@ -82,13 +82,31 @@ def test_s21_defines_exactly_the_three_assigned_tables() -> None:
     """The checkpoint boundary itself, pinned as a literal in `test_models.py`.
 
     The S1.1 boundary test could not include these tables, and nothing else
-    asserts that S2.1 stayed at three. S2.2's five tables appearing here would be
-    later work pulled backwards; a fourth S2.1 table would be scope nobody
+    asserts that S2.1 stayed at three. A fourth S2.1 table would be scope nobody
     declared.
     """
     s21_actual = {name for name in Base.metadata.tables if name in S21_TABLES}
 
     assert s21_actual == S21_TABLES
+
+
+def test_s22_added_no_tables() -> None:
+    """S2.2's boundary is a set of **zero** tables, asserted rather than assumed.
+
+    The tempting additions are `ad_creatives`, `ad_platforms`, `ad_countries` and
+    `landing_pages`, because `ARCHITECTURE.md` lists them in one sentence
+    together. None of them is approved S2.2 scope, and `ad_creatives` in
+    particular cannot be built honestly: the normalizer reads only `bodies[0]`
+    and flattens it, so there is no card-level structure to store. Building it
+    now would fabricate rows.
+
+    An empty set is still a boundary worth asserting, because it is the thing that
+    has to be deleted deliberately when `ad_creatives` is eventually built.
+    """
+    from tests.test_models import S22_TABLES
+
+    assert S22_TABLES == frozenset()
+    assert {name for name in Base.metadata.tables if name in S22_TABLES} == S22_TABLES
 
 
 def test_every_s21_model_is_mapped_to_its_own_table() -> None:
@@ -272,8 +290,11 @@ def test_ads_stores_data_origin_and_never_the_evidence_class() -> None:
 def test_ad_snapshots_carries_exactly_the_expected_columns() -> None:
     """The full column set, listed.
 
-    Note what is absent: no `copy_hash`, no `creative_hash`, and no
-    `page_id`/`country` columns. Targeting is S2.2's, one table per dimension.
+    `copy_hash` and `creative_hash` arrived in S2.2 as siblings of the frozen
+    `content_hash`, not as inputs to it. Note what is still absent: no
+    `page_id`/`country` columns -- targeting is S2.2's *per-dimension tables*,
+    which this checkpoint deliberately did not build (see the `ad_creatives`
+    deferral below).
     """
     assert _columns(AdSnapshot) == {
         "id",
@@ -283,22 +304,91 @@ def test_ad_snapshots_carries_exactly_the_expected_columns() -> None:
         "collection_run_id",
         "raw_ref",
         "content_hash",
+        "copy_hash",
+        "creative_hash",
         "ad_status",
         "meta_delivery_start",
         "normalized",
     }
 
 
-@pytest.mark.parametrize("column", ["copy_hash", "creative_hash", "countries", "platforms"])
-def test_ad_snapshots_defers_the_s22_columns(column: str) -> None:
-    """The card/creative model and per-dimension targeting tables are S2.2.
+@pytest.mark.parametrize("column", ["countries", "platforms", "landing_page_id"])
+def test_ad_snapshots_defers_the_per_dimension_s22_tables(column: str) -> None:
+    """Targeting stays in its own tables, which this checkpoint did not build.
 
-    S2.1 stores one self-contained comparison value, `content_hash`, so that
-    nothing here depends on a richer hash arriving later. S2.2 will add the
-    sub-hashes as new columns and the historical `content_hash` values will keep
-    meaning exactly what they meant under v1.
+    `ad_countries` and `ad_platforms` are not S2.2 scope. S2.2 added the two
+    *digest* columns and duplicate grouping; the per-dimension tables are
+    separate work, and adding them here because an older `ARCHITECTURE.md`
+    mentions them in the same list would be scope nobody approved.
     """
     assert column not in _columns(AdSnapshot)
+
+
+def test_ad_snapshots_has_no_card_level_creative_columns() -> None:
+    """`ad_creatives` is deferred, and this is what keeps it deferred.
+
+    The current normalized contract exposes no card-level structure:
+    `app/providers/data/normalize.py::_read_body` reads only `bodies[0]` and
+    flattens it into `RawAdRecord`, and the committed corpus holds nine ads, every
+    one single-bodied. A per-card table built today would fabricate rows rather
+    than record observations, so the columns that would hold card copy do not
+    exist and this test fails if one is added without a normalizer change first.
+    """
+    for column in ("card_key", "card_index", "card_copy"):
+        assert column not in _columns(AdSnapshot)
+
+
+def test_the_two_s22_digests_are_nullable_and_stay_that_way() -> None:
+    """`NULL` means "this observation predates S2.2", and it is a real state.
+
+    `ad_snapshots` is append-only, so a row written before the columns existed can
+    never be backfilled -- an `UPDATE` is refused by the trigger. A `NOT NULL`
+    column would therefore make them un-addable to any populated history, which is
+    precisely the state this schema exists to survive.
+    """
+    assert _table(AdSnapshot).c.copy_hash.nullable is True
+    assert _table(AdSnapshot).c.creative_hash.nullable is True
+
+
+def test_both_s22_digests_are_checked_with_the_same_pattern_as_content_hash() -> None:
+    """One validation pattern in the schema, not three that can drift.
+
+    The expression is byte-identical to S2.1's, so a malformed digest cannot make
+    duplicate detection silently stop finding anything. It also accepts NULL
+    without an `IS NULL OR` guard: a `CHECK` is satisfied unless it evaluates to
+    FALSE, and a regex yields NULL for NULL.
+    """
+    content_expression = next(
+        str(constraint.sqltext)
+        for constraint in _table(AdSnapshot).constraints
+        if isinstance(constraint, CheckConstraint)
+        and str(constraint.name) == "ck_ad_snapshots_content_hash_is_sha256_hex"
+    )
+    expressions = {
+        str(constraint.name): str(constraint.sqltext)
+        for constraint in _table(AdSnapshot).constraints
+        if isinstance(constraint, CheckConstraint)
+    }
+
+    assert "ck_ad_snapshots_copy_hash_is_sha256_hex" in expressions
+    assert "ck_ad_snapshots_creative_hash_is_sha256_hex" in expressions
+    assert expressions["ck_ad_snapshots_copy_hash_is_sha256_hex"] == content_expression
+    assert expressions["ck_ad_snapshots_creative_hash_is_sha256_hex"] == content_expression
+
+
+def test_both_s22_digest_indexes_are_declared_with_a_named_access_pattern() -> None:
+    """One index per query in `app/services/duplicate_detection.py`.
+
+    Named explicitly rather than derived, so a rename that left the query
+    unindexed fails here instead of degrading silently into a full scan of the
+    whole history.
+    """
+    assert {index.name for index in _table(AdSnapshot).indexes} == {
+        "ix_ad_snapshots_copy_hash",
+        "ix_ad_snapshots_creative_hash",
+    }
+    for index in _table(AdSnapshot).indexes:
+        assert len(index.columns) == 1, index.name
 
 
 def test_a_snapshot_may_hold_at_most_one_row_per_ad_per_run() -> None:
@@ -599,16 +689,25 @@ def test_seen_in_run_declares_no_relationship_and_the_models_declare_no_methods(
         assert declared == set(), f"{model.__name__} declares {sorted(declared)}"
 
 
-def test_no_s21_table_carries_a_trigram_or_search_index() -> None:
-    """`pg_trgm` was installed in S0.2 and no GIN index is built on this schema.
+def test_no_s21_table_carries_a_text_search_index() -> None:
+    """`pg_trgm` was installed in S0.2 and still no GIN index is built on this schema.
 
-    Ad copy is the text that will eventually be searched, but the query is S2.2's
-    to write first. An index built before the query exists is how index
-    overengineering starts, and `test_schema_integration` asserts the absence in
-    the database.
+    Ad copy is the text that will eventually be searched, but that query has still
+    not been written, and an index built before the query exists is how index
+    overengineering starts. `test_schema_integration` asserts the absence in the
+    database.
+
+    **S2.2 added two btree indexes** on `ad_snapshots(copy_hash)` and
+    `(creative_hash)`. Those are not search indexes and do not weaken this test:
+    they are equality lookups for the duplicate-grouping queries that S2.2 also
+    wrote, and the guard is specifically about indexing copy *text* before
+    something queries it. Asserted on the index kind rather than on the count, so
+    a GIN or trigram index added later still fails here.
     """
     for model in S21_MODELS:
-        assert list(_table(model).indexes) == [], model.__tablename__
+        for index in _table(model).indexes:
+            using = index.dialect_options["postgresql"].get("using")
+            assert using != "gin", f"{model.__tablename__}.{index.name} is a GIN index"
 
 
 def test_an_internal_id_is_never_stored_where_a_provider_id_belongs() -> None:

@@ -65,6 +65,7 @@ S11_REVISION = "0002_collection_domain"
 S12_REVISION = "0003_jobs_table"
 S21_REVISION = "0004_ad_history"
 S21_FIX_REVISION = "0005_ads_data_origin_check"
+S22_REVISION = "0006_s2_2_hashes"
 BASE_REVISION = "0001_pg_trgm"
 
 NOW = datetime(2026, 9, 30, 9, 0, tzinfo=UTC)
@@ -132,21 +133,21 @@ def test_the_migration_applies_and_leaves_one_head() -> None:
     assert len(ScriptDirectory.from_config(_config()).get_heads()) == 1
     with get_engine().connect() as connection:
         applied = connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-    assert applied == S21_FIX_REVISION
+    assert applied == S22_REVISION
 
 
 def test_s21_extends_the_s12_revision_rather_than_branching() -> None:
     """One linear lineage. Two heads means no single `upgrade` reaches the schema.
 
-    Five revisions rather than four: `0005` repairs a missing check that
-    `0004_ad_history` failed to install, and it extends the same chain rather than
-    branching from it. A repair that branched would leave two heads and no single
-    `upgrade` reaching the schema.
+    Six revisions: `0005` repairs a missing check that `0004_ad_history` failed to
+    install, and `0006` adds S2.2's two digests. Both extend the same chain
+    rather than branching from it, so one `upgrade` still reaches everything.
     """
     script = ScriptDirectory.from_config(_config())
     revisions = {revision.revision: revision.down_revision for revision in script.walk_revisions()}
 
     assert revisions == {
+        S22_REVISION: S21_FIX_REVISION,
         S21_FIX_REVISION: S21_REVISION,
         S21_REVISION: S12_REVISION,
         S12_REVISION: S11_REVISION,
@@ -314,6 +315,199 @@ def test_the_s12_downgrade_renders_complete_sql_without_executing_it() -> None:
     assert "DROP INDEX ix_jobs_kind" in sql or "DROP TABLE jobs" in sql
 
 
+def _chain_with_response(
+    session: Session, page_id: str = "100000000000095"
+) -> tuple[CollectionRun, RawResponse]:
+    """A complete chain down to a raw response, ready for a snapshot to cite.
+
+    `page_id` is a parameter because `facebook_pages.page_id` is globally unique,
+    so two tests cannot share one chain. Returns the run and the response; the
+    `ads` row is created separately by `_ad_id`, so a test that only needs a
+    valid parent does not have to create one.
+    """
+    competitor = _competitor(session, f"Acme {page_id[-3:]}")
+    page = _page(session, competitor, page_id=page_id)
+    # The provider call carries its own `CHECK (finished_at >= started_at)`, and the
+    # file-wide `NOW` is a fixed 2026-09-30 constant, so both timestamps are taken
+    # from the real clock to keep the pair ordered.
+    now = datetime.now(UTC)
+    run = _collection_run(session, page, flush=False, started_at=None, finished_at=None)
+    session.flush()
+    call = _provider_run(
+        session, run, flush=False, started_at=now, finished_at=now + timedelta(seconds=2)
+    )
+    session.flush()
+    response = RawResponse(provider_run_id=call.id, payload={"ads": []})
+    session.add(response)
+    session.flush()
+    return run, response
+
+
+def _ad_id(session: Session, run: CollectionRun, meta_ad_id: str = "ad-0001") -> uuid.UUID:
+    """A real `ads` row, because `ad_snapshots.ad_id` holds a `RESTRICT` foreign key.
+
+    Every hand-written snapshot in this file needs a parent, and a random UUID
+    would make the database refuse the row before reaching the constraint under
+    test -- so a test asserting on `fk_ad_snapshots_raw_ref` or on a digest check
+    would be passing, or failing, for entirely the wrong reason.
+    """
+    from app.models import Ad
+
+    ad = Ad(
+        provider="mock",
+        meta_ad_id=meta_ad_id,
+        data_origin=DataOrigin.third_party,
+        first_seen_at=NOW,
+        last_seen_at=NOW,
+    )
+    session.add(ad)
+    session.flush()
+    return ad.id
+
+
+def test_the_s22_downgrade_renders_complete_sql_without_executing_it() -> None:
+    """Every S2.2 object dropped, in reverse order, rendered offline.
+
+    The indexes must go before the columns they are built on, and the checks
+    before the columns they constrain -- dropping a column first would take its
+    indexes and its `CHECK` with it silently, leaving the rendered SQL claiming
+    to drop objects that were already gone.
+    """
+    buffer = io.StringIO()
+    with redirect_stdout(buffer):
+        command.downgrade(_config(), f"{S22_REVISION}:{S21_FIX_REVISION}", sql=True)
+    sql = buffer.getvalue()
+
+    assert "DROP INDEX ix_ad_snapshots_copy_hash" in sql
+    assert "DROP INDEX ix_ad_snapshots_creative_hash" in sql
+    assert "DROP CONSTRAINT ck_ad_snapshots_copy_hash_is_sha256_hex" in sql
+    assert "DROP CONSTRAINT ck_ad_snapshots_creative_hash_is_sha256_hex" in sql
+    assert "DROP COLUMN copy_hash" in sql
+    assert "DROP COLUMN creative_hash" in sql
+
+    assert sql.index("DROP INDEX") < sql.index("DROP COLUMN")
+    assert sql.index("DROP CONSTRAINT") < sql.index("DROP COLUMN")
+
+
+def test_the_s22_columns_are_nullable_and_unindexed_beyond_their_own(
+    db_session: Session,
+) -> None:
+    """Both digest columns accept NULL, and NULL is a real state.
+
+    `ad_snapshots` is append-only, so a row written before S2.2 can never be
+    backfilled -- an `UPDATE` is refused by the trigger. `NULL` therefore means
+    "this observation predates S2.2", and it is not a default or a placeholder.
+    A `NOT NULL` column here would make the columns un-addable to any populated
+    history, which is exactly the state this schema is designed to survive.
+    """
+    with get_engine().connect() as connection:
+        rows = connection.execute(
+            text(
+                "SELECT column_name, is_nullable FROM information_schema.columns "
+                "WHERE table_name = 'ad_snapshots' "
+                "AND column_name IN ('copy_hash', 'creative_hash')"
+            )
+        ).all()
+
+    assert {str(row.column_name): str(row.is_nullable) for row in rows} == {
+        "copy_hash": "YES",
+        "creative_hash": "YES",
+    }
+
+
+@pytest.mark.parametrize(
+    ("column", "constraint"),
+    [
+        ("copy_hash", "ck_ad_snapshots_copy_hash_is_sha256_hex"),
+        ("creative_hash", "ck_ad_snapshots_creative_hash_is_sha256_hex"),
+    ],
+)
+def test_a_malformed_s22_digest_is_refused_by_the_database(
+    db_session: Session, column: str, constraint: str
+) -> None:
+    """A malformed digest would not fail loudly.
+
+    It would make every future comparison unequal, so no snapshot would ever be
+    written again, and duplicate detection would silently stop finding anything.
+    That is why the shape is checked at the database rather than trusted from
+    Python -- and it is proven here by writing, not by reading the metadata,
+    because a `CHECK` that exists only in Python is a gap.
+
+    Raw SQL because the ORM's `Enum`-style validators do not apply to a plain
+    `String` column, and the claim is about the database's own refusal.
+    """
+    run, response = _chain_with_response(db_session)
+
+    # The bad value goes in the column under test and the *other* one is left a
+    # valid digest. Interchanging them would let one check mask the other, and the
+    # test would pass for the wrong constraint.
+    with pytest.raises(IntegrityError) as caught:
+        db_session.execute(
+            text(
+                "INSERT INTO ad_snapshots (id, ad_id, collection_run_id, raw_ref, "
+                "content_hash, normalized, copy_hash, creative_hash) "
+                "VALUES (:id, :ad, :run, :raw, :content, :normalized, :bad, :good)"
+            ),
+            {
+                "id": uuid.uuid4(),
+                "ad": _ad_id(db_session, run),
+                "run": run.id,
+                "raw": response.id,
+                "content": "0" * 64,
+                "normalized": "{}",
+                "bad": "not-a-digest" if column == "copy_hash" else "1" * 64,
+                "good": "1" * 64 if column == "copy_hash" else "not-a-digest",
+            },
+        )
+
+    assert constraint in str(caught.value)
+    db_session.rollback()
+
+
+def test_a_null_s22_digest_is_accepted(db_session: Session) -> None:
+    """The negative control for the two refusals above.
+
+    Without it, a constraint that rejected everything -- or a `NOT NULL` slipped
+    onto the column -- would satisfy the refusal tests. A pre-S2.2 row has to be
+    storable, or the columns could not have been added to a real history at all.
+    """
+    run, response = _chain_with_response(db_session)
+
+    snapshot = AdSnapshot(
+        ad_id=_ad_id(db_session, run),
+        collection_run_id=run.id,
+        raw_ref=response.id,
+        content_hash="0" * 64,
+        normalized={"external_ad_id": "ad-0001"},
+    )
+    db_session.add(snapshot)
+    db_session.flush()
+
+    db_session.expire(snapshot)
+    db_session.refresh(snapshot)
+    assert snapshot.copy_hash is None
+    assert snapshot.creative_hash is None
+
+
+def test_both_s22_indexes_exist_in_the_database() -> None:
+    """Read from `pg_indexes`, so this is the database agreeing with the models.
+
+    Each index exists for exactly one access pattern: grouping snapshots by
+    digest to find ads that share copy, and by digest to find ads that share
+    assets. The names are asserted rather than derived, so a rename that left
+    the query unindexed would fail here rather than degrade silently.
+    """
+    with get_engine().connect() as connection:
+        installed = set(
+            connection.execute(
+                text("SELECT indexname FROM pg_indexes WHERE tablename = 'ad_snapshots'")
+            ).scalars()
+        )
+
+    assert "ix_ad_snapshots_copy_hash" in installed
+    assert "ix_ad_snapshots_creative_hash" in installed
+
+
 def test_the_s21_fix_downgrade_renders_complete_sql_without_executing_it() -> None:
     """The repair revision's own downgrade, rendered offline.
 
@@ -413,6 +607,8 @@ def test_the_s21_tables_exist_and_carry_their_expected_columns() -> None:
             "collection_run_id",
             "raw_ref",
             "content_hash",
+            "copy_hash",
+            "creative_hash",
             "ad_status",
             "meta_delivery_start",
             "normalized",

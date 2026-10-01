@@ -60,6 +60,8 @@ from app.models.ads import Ad, AdSnapshot, SeenInRun
 from app.providers.data.models import RawAdRecord
 from app.providers.data.provenance import DataOrigin
 from app.services.content_hash import content_hash_v1
+from app.services.copy_hash import copy_hash_v1
+from app.services.creative_hash import creative_hash_v1
 
 
 @dataclass(frozen=True, slots=True)
@@ -253,6 +255,19 @@ def _persist_one(
             collection_run_id=run_id,
             raw_ref=observed.raw_response_id,
             content_hash=digest,
+            # S2.2's two sibling digests. Written only here, at INSERT, because
+            # the table is append-only and an `UPDATE` would be refused -- so a
+            # snapshot predating S2.2 keeps NULL forever rather than being
+            # backfilled, which is the same trade `content_hash` made.
+            #
+            # The change decision above still compares `content_hash` alone. That
+            # is deliberate: `content_hash` already covers words *and* assets, so
+            # a creative-only change is caught by it and needs no second
+            # comparison that could disagree. These two columns exist to be
+            # *queried* -- grouping ads by copy, and by creative -- not to
+            # decide when to write.
+            copy_hash=copy_hash_v1(record),
+            creative_hash=creative_hash_v1(record),
             ad_status=record.ad_status,
             meta_delivery_start=record.meta_delivery_start,
             normalized=_normalized_json(record),
