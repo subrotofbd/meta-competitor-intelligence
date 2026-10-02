@@ -13,6 +13,7 @@ import { describe, expect, it, vi } from "vitest";
 import { App } from "./App";
 import { API_PROXY_TARGET, rewriteApiPath } from "../dev-proxy";
 import { BASE_PATH, ApiError, apiUrl } from "./api/client";
+import type { AnalysisOut } from "./types/api";
 
 describe("the shell", () => {
   it("mounts React", () => {
@@ -68,6 +69,48 @@ describe("the API client", () => {
     expect(error.status).toBe(404);
     expect(error.detail).toBe("Not Found");
     expect(error).toBeInstanceOf(Error);
+  });
+});
+
+describe("the analysis contract", () => {
+  /*
+   * A compile-time check, and the runtime assertion is incidental.
+   *
+   * `interpretation` is typed `Record<string, unknown>` rather than
+   * `Record<string, string | null>` so a future `analysis_version` may carry values
+   * that are not strings. TypeScript erases types at runtime, so no runtime assertion
+   * can prove that -- but `tsc --noEmit` can, and it runs as part of `npm run build`.
+   * Revert the type to `string | null` and the build fails on the literals below, which
+   * is the whole point of keeping them.
+   */
+  it("tolerates interpretation values that are not strings", () => {
+    const analysis: AnalysisOut = {
+      evidence_class: "AI_INTERPRETATION",
+      copy_hash: "0".repeat(64),
+      analysis_version: "mock-v1",
+      prompt_version: "s3.1-analysis-v1",
+      provider: "mock",
+      model: null,
+      language: "en",
+      confidence: null,
+      interpretation: {
+        // What v1 actually produces.
+        hook: "Opens on a failure the reader has already had.",
+        // Absent from the source, so `null` -- never a guessed default.
+        urgency: null,
+        // What a later version is allowed to produce. None of these is broken data.
+        hook_score: 0.82,
+        evidence: { claim: "5,000 boil cycles", method: "published test log" },
+        tags: ["specificity", "proof"],
+      },
+      source_snapshot_id: "0".repeat(8) + "-0000-4000-8000-000000000000",
+      created_at: "2026-10-02T00:00:00Z",
+    };
+
+    // Reading a value back yields `unknown`, so it must be narrowed before use --
+    // which is exactly the discipline the type is meant to impose.
+    const hook: unknown = analysis.interpretation["hook"];
+    expect(typeof hook === "string" ? hook : null).toContain("failure");
   });
 });
 

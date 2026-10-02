@@ -31,9 +31,20 @@
  * 3. **`AnalysisOut.interpretation` is an open mapping, not fourteen fields.** The
  *    backend deliberately does not flatten the analysis into typed columns: the field
  *    set is versioned by `analysis_version`, and freezing v1's fourteen names into
- *    this contract would make a v2 a breaking change. So it is
- *    `Readonly<Record<string, string | null>>`, and a UI reads the keys it knows and
- *    renders anything else as `null` -- never as a guessed default.
+ *    this contract would make a v2 a breaking change.
+ *
+ *    So it is `Readonly<Record<string, unknown>>`, and the value type is `unknown`
+ *    rather than `string | null`. The backend declares
+ *    `interpretation: dict[str, str | None]` today, but that is a property of v1 and
+ *    not of the endpoint: a later `analysis_version` may carry a number, a nested
+ *    object or a list, and none of those are broken data. Pinning the value type here
+ *    would make a v2 arrive as a type error at every call site, instead of as
+ *    something one renderer has to handle.
+ *
+ *    `unknown` obliges a reader to narrow before use, which is the point. A UI reads
+ *    the keys it knows and renders anything it does not recognise as `null` -- never
+ *    as a guessed default -- and has to decide what a non-string value means rather
+ *    than having that decided by a type annotation.
  *
  * ## `null` stays `null`
  *
@@ -254,8 +265,12 @@ export interface AnalysisOut {
   /**
    * The fourteen fields, or `{}` when a model answered with all of them `null` --
    * an empty mapping is a real reading of sparse copy, not missing data. See trap 3.
+   *
+   * The value type is `unknown`: today's values are `string | null`, but that belongs
+   * to `analysis_version` v1 rather than to this endpoint, so a later version may
+   * carry values of other types without anything being wrong. Narrow before use.
    */
-  readonly interpretation: Readonly<Record<string, string | null>>;
+  readonly interpretation: Readonly<Record<string, unknown>>;
   readonly source_snapshot_id: string;
   readonly created_at: string;
 }
