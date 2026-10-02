@@ -1,0 +1,67 @@
+@import "tailwindcss";
+
+/*
+ * Dark mode is **class-based**, declared here.
+ *
+ * Tailwind v4 defaults `dark:` to the OS preference (`prefers-color-scheme`), which
+ * cannot be overridden by the user. This app lets the user choose, so the variant is
+ * redefined to key off a `.dark` class on `<html>` -- set before first paint by
+ * `main.tsx`.
+ *
+ * The `&:where(.dark, .dark *)` form is deliberate: `:where()` has zero
+ * specificity, so a `dark:bg-*` utility never outranks an explicit light value by
+ * accident. Getting this wrong produces a theme that half-works, which is worse than
+ * one that does not.
+ */
+@custom-variant dark (&:where(.dark, .dark *));
+
+@layer base {
+  /*
+   * `color-scheme` is what makes native UI agree: scrollbars, form controls, the
+   * canvas behind the page. Without it, a dark page still renders a light scrollbar
+   * and light select popups.
+   */
+  :root {
+    color-scheme: light;
+  }
+
+  .dark {
+    color-scheme: dark;
+  }
+
+  /*
+   * Stops iOS Safari inflating text in landscape. A data app with dense tables
+   * should not have its font size silently change on rotation.
+   */
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    /*
+     * The base surface. Every colour in the app inherits from here, so light and dark
+     * are two sets of the same tokens rather than two sets of ad-hoc greys.
+     */
+    @apply min-h-dvh bg-white text-slate-900 antialiased dark:bg-slate-950 dark:text-slate-100;
+  }
+
+  /*
+   * A visible focus ring, always. The default ring is removed on several controls
+   * for looks, and the replacement has to be more than a colour change or keyboard
+   * navigation becomes invisible.
+   */
+  :focus-visible {
+    @apply outline-2 outline-offset-2 outline-sky-600 dark:outline-sky-400;
+  }
+}
+
+@layer components {
+  /*
+   * The one layout primitive the shell needs. Everything else is composed from
+   * utilities at the call site; adding a component class per card or row would be
+   * CSS this project does not need yet.
+   */
+  .page-shell {
+    @apply mx-auto w-full max-w-6xl px-4 sm:px-6 lg:px-8;
+  }
+}

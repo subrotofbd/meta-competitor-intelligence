@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!--
+      The initial theme is applied before React mounts, by `main.tsx` reading the
+      stored preference. Putting it in `index.html` instead would flash the wrong
+      theme on every load, because the class has to be on <html> before first paint.
+    -->
+    <title>Brandset — Meta Competitor Intelligence</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

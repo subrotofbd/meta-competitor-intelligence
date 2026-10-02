@@ -1,0 +1,32 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "useDefineForClassFields": true,
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "skipLibCheck": true,
+
+    /* Bundler mode. Vite owns emit; `tsc` only typechecks (`--noEmit`). */
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+    "jsx": "react-jsx",
+
+    /* Strictness. `exactOptionalPropertyTypes` and `noUncheckedIndexedAccess`
+       matter more than usual here: this file mirrors a backend contract where a
+       missing value is `null` and must never become `undefined` or a default. */
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUncheckedIndexedAccess": true,
+    "noUncheckedSideEffectImports": true,
+
+    /* `vite/client` supplies the ambient module declarations for `*.css` imports and
+       `import.meta.env`. Without it, `import "./styles/index.css"` is a TS2307. */
+    "types": ["vite/client", "vitest/globals"]
+  },
+  "include": ["src", "dev-proxy.ts", "vite.config.ts"]
+}

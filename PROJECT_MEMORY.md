@@ -2777,3 +2777,98 @@ asserts it.
 
 **Next (not started, needs approval):** whether to add `--with-ai` to the seed now that
 the data is ready, then the S3.3 frontend scaffold.
+
+---
+
+## 2026-10-02, S3.3 step 4 -- frontend scaffold
+
+The frontend foundation only. **No backend code, no migration, no seed change, no AI
+fixture change.** 12 new files, all under `frontend/`.
+
+### Stack and versions
+
+React 19 + Vite 7 + TypeScript 5.9 + Tailwind 4 (`@tailwindcss/vite`). Vitest 4 +
+jsdom + Testing Library for the one mount test. Node 24.19.0, npm 11.19.0.
+`package-lock.json` committed, like `uv.lock`.
+
+Tailwind v4 was chosen over v3 because it needs no `tailwind.config.js` and no
+PostCSS step -- the `@tailwindcss/vite` plugin plus one `@import "tailwindcss"`.
+Dark mode is class-based via `@custom-variant dark (&:where(.dark, .dark *))`, since
+v4's default is `prefers-color-scheme` and the user must be able to choose.
+
+### Three things that are easy to get wrong, and are pinned down
+
+**1. The `/api` prefix is the client's, and the proxy must strip it.** The backend
+mounts its routers at the **root** (`app.include_router(ads_router)`, no `prefix=`),
+so the real routes are `GET /ads` and `GET /competitors`. The client speaks
+`/api/...`. Without `rewrite`, `/api/ads` reaches the backend as `/api/ads` and 404s
+-- and a 404 on every endpoint is indistinguishable, from the browser, from the API
+being down. `dev-proxy.ts` holds `API_PROXY_TARGET` and `rewriteApiPath` and is
+unit-tested, because this step starts no dev server and so cannot verify the proxy by
+running it. It is a separate module from `vite.config.ts` for a specific reason:
+`vite.config.ts` imports the Vite plugins, which pull in esbuild, and **esbuild
+refuses to load under jsdom** (its `TextEncoder` realm check fails). Importing the
+Vite config from a test dies with an error about `TextEncoder` that says nothing about
+proxies.
+
+**2. Vitest runs on the `threads` pool, not `forks`.** The project path contains a
+space (`C:\Users\DELL\Downloads\Meta Audit`); the forks pool spawns a child process
+whose module path arrives percent-encoded, the worker never responds, and the run
+fails after 60s with `Timeout waiting for worker to respond` -- an error that looks
+nothing like its cause. Threads share the process, so there is no path to mis-encode.
+`fileParallelism: false` + `maxWorkers: 1` keeps the one-test-at-a-time rule; Vitest 4
+dropped `poolOptions.*.singleFork`.
+
+**3. `npm 11` blocks install scripts by default.** `esbuild`'s postinstall never ran.
+It turns out not to matter -- Vite resolves the platform binary through the optional
+dependency -- but it will look like a broken install to the next person.
+
+### jsdom has no `matchMedia`
+
+`App.initialTheme` calls it, so every render threw `TypeError` under test. The stub
+lives in `src/test-setup.ts`, **not** in `App`: this is a gap in the test environment,
+not a runtime condition, and wrapping the app in a feature check to satisfy a test
+runner would add a branch no user can reach.
+
+### Tests are mutation-checked, not just green
+
+9 tests. Two were verified load-bearing by mutating `App.tsx` and confirming the
+failure, then reverting:
+
+- added `fetch` to the mount effect -> `makes no API request on load` fails
+- made `applyTheme` a no-op -> the `dark` class assertion fails
+
+That second one matters because a broken theme class fails *silently*: every `dark:`
+token just stops applying, and the app only looks wrong in dark mode.
+
+The mount test also had to use `fireEvent` rather than `toggle.click()`. React only
+flushes state and effects inside `act`; a raw DOM click asserts against a render that
+has not happened yet.
+
+### Types mirror the contracts, and are hand-written
+
+`src/types/api.ts` is written against each named backend model rather than generated
+from OpenAPI. Generating would mean the client silently accepts whatever the backend
+emits, which throws away the intent of `schemas/base.py`'s `extra="forbid"`.
+
+All three named traps handled: `duration_seconds` is a **`string`** (Pydantic
+serialises `Decimal` as a string to avoid float precision loss -- typing it `number`
+would invite the very error it prevents); `interpretation` is an open
+`Record<string, string | null>` so a future `analysis_version` is not a breaking
+change; every optional stays `| null` and nothing is defaulted. `AnalysisOut.analysis`
+is `null` when absent, never an object of fourteen nulls.
+
+`SnapshotOut` is the requested name for the backend's `SnapshotListItemOut`; the
+mapping is noted in the file so the two are not mistaken for unrelated contracts.
+
+### Gates
+
+`npm run build` (`tsc --noEmit && vite build`) clean -- 30 modules, CSS **11.28 kB**,
+which is the evidence Tailwind actually emitted utilities rather than resolving to
+nothing. 9 tests passed. No backend suite run, because no backend file changed.
+
+Development database untouched and re-verified: `competitors` 1, `ads` 8,
+`ad_snapshots` 8, `collection_runs` 3. **No dev server was started.**
+
+**Next (not started, needs approval):** the first real screen. Ad grid, filters, ad
+detail, snapshot history, AI panel, media and CSV each remain separate steps.
