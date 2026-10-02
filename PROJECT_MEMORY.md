@@ -3151,3 +3151,83 @@ unchanged** (one new `var-annotated` error was fixed rather than absorbed),
 
 Database untouched and re-verified: `ads` 8, `ad_snapshots` 8, `collection_runs` 3,
 `ad_analysis` 0 -- identical to step 6.
+
+---
+
+## 2026-10-02, PRODUCT UI/UX DIRECTION -- standing constraint
+
+Recorded on explicit instruction, before the remaining S3.3 frontend work begins. This is
+a **project-level constraint**, not a note about one screen: it binds every piece of UI
+this project builds from here on, and it outranks the mockups that preceded it.
+
+### What the product must feel
+
+Clean, premium, engaging, spacious, calm, easy to scan, professional, modern SaaS,
+research-focused.
+
+### What it must NOT feel
+
+Noisy, cluttered, overly dark, cyberpunk, flashy, overly decorative, badge-heavy,
+metric-heavy.
+
+### The principles, in full
+
+1. Information hierarchy comes before decoration.
+2. Use generous whitespace and breathing room.
+3. Keep typography clear and readable.
+4. Use restrained borders, cards and separators.
+5. Use color only when it communicates meaning.
+6. Do not use color simply to make the interface look busy.
+7. Do not overuse gradients, glow, shadows, animations or visual effects.
+8. Light mode and dark mode must both be polished.
+9. Dark mode must remain refined and low-noise.
+10. Tables and grids should feel organized, not cramped.
+11. Detail pages should use clear sections and progressive information hierarchy.
+12. Mobile layouts must remain clean and usable.
+13. Avoid unnecessary animations.
+14. Do not create dashboard-style visual overload.
+15. Provenance must remain visible but subtle.
+16. AI interpretation must be clearly distinguishable without visually dominating the page.
+17. Unsupported performance claims must never be visually implied.
+18. The interface should feel like a professional research/analytics product rather than
+    a generic ad-spy tool.
+
+### Reference feel
+
+**Clarity > decoration. Hierarchy > density. Evidence > hype. Calm > noise.
+Useful > flashy.**
+
+### Status of the earlier dark dashboard mockup
+
+Conceptual reference only. It is **not** a requirement that the final product be heavily
+dark or visually dense. Where it conflicts with the principles above, the principles win.
+
+### Scope
+
+Every remaining piece of UI, and every future one:
+
+Ads filters and search · pagination · Ad Detail · snapshots · AI interpretation · media
+references · CSV and export · reports · responsive and mobile · settings.
+
+### Three notes on reading this against the code
+
+**Principles 5 and 15 pull against work already done.** Step 5's provenance primitives
+give `EvidenceClassBadge` four distinct tones, and step 6 renders a badge in several
+cells. That is defensible under principle 5 -- the colour *is* carrying meaning, and
+principle 7 already requires the tone classes to exist as literal CSS for Tailwind to
+emit them. But "visible but subtle" (15) and "not badge-heavy" are a real ceiling on it,
+and it has not yet been pressure-tested against a dense page. Ad Detail is the first
+screen likely to show that, and this direction should be applied there rather than
+retro-fitted to the primitives afterwards. **No code was changed by this entry.**
+
+**Principle 17 is not only a copy rule.** "Must never be visually implied" means a
+dashboard-shaped number, a chart axis, or a sorted-by-metric table would violate this
+even with no spend value in the payload. The product's inability to answer performance
+questions has to be legible in the layout, not just in the absence of a label.
+
+**Principle 18 is the one that rules out the obvious mistake.** An ad-spy tool leads with
+thumbnails and a wall of badges. This product leads with evidence: what was observed,
+from where, how long, with what certainty. Media is references only, so there is no
+thumbnail grid to build even if one were wanted.
+
+Documentation only. No application, API, schema, database or seed change.
