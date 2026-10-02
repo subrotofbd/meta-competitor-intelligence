@@ -3536,3 +3536,86 @@ reference and nothing on the screen reads or requests an analysis.
 
 **Next (not started, needs approval):** CSV export UI, and the end-of-S3.3 document
 reconciliation that has been deferred since the step-6 checkpoint.
+
+---
+
+## 2026-10-02, S3.3 step 10 -- CSV export
+
+**Frontend only.** No backend, database, seed, migration or AI-fixture change.
+
+| File | Change |
+|---|---|
+| `components/library/adsQuery.ts` | `adsQueryToFilterParams` extracted; `adsQueryToParams` now built **on** it |
+| `components/library/ExportButton.tsx` | **New.** The control |
+| `components/library/ExportButton.test.tsx` | **New.** 23 tests |
+| `components/library/AdsLibrary.tsx` | Control placed with the results |
+| `api/library.ts` | `adsCsvUrl`, `fetchAdsCsv` |
+
+### "Export what I filtered" has exactly one definition
+
+The backend's `/exports/ads.csv` accepts exactly the twelve parameters the list does --
+provider, competitor_id, facebook_page_id, country, current_status, provider_active,
+data_origin, the four date bounds and q -- and accepts no paging or sorting. That parity is
+the whole basis of the feature, so the filter set is now defined **once**, in
+`adsQueryToFilterParams`, and `adsQueryToParams` is built on top of it. The list URL, the
+list request and the export URL all read the same function.
+
+Two builders would be two things to keep in step, and the failure mode is the worst kind:
+an export that quietly drops a filter still produces a plausible-looking file containing
+the wrong rows, and nothing about it looks broken.
+
+`page`, `page_size`, `sort` and `direction` are excluded -- an export is not a page of
+results, and the endpoint would not accept them.
+
+### Why the body is read in the browser
+
+The endpoint is a streamed attachment, and an `<a href>` would let the browser stream it
+straight to disk with nothing buffered here. That is the better mechanism and it is
+unusable: a 400, 413 or 500 would download a JSON error body as `ads.csv`, or navigate
+away, and the user would be told nothing. Reporting failure requires seeing the status, so
+the response is read once, and **only after it is known to have succeeded**. The bytes never
+enter React state and are never parsed.
+
+The 413 is a real ceiling, not a failure to smooth over: `MAX_EXPORT_ROWS` is checked
+before streaming starts, so the client receives a status rather than a truncated file, and
+the message says plainly that nothing was exported and that narrowing the filters is the
+remedy.
+
+### One choice worth arguing for
+
+A malformed percent-escape in `Content-Disposition` refuses the name and falls back to
+`ads.csv`, rather than taking the mangled remainder. Falling back still downloads the
+correct bytes under a name we chose, which beats a download called `%E0%A4%A.csv`.
+
+No success message. The browser already shows the download, and a "success" line would be a
+second, weaker version of the same fact.
+
+### A mutation that exposed a test passing for the wrong reason
+
+Deleting the re-entrancy lock was **not** caught. A probe showed why: `fireEvent` flushes
+React on every call, so the second click landed on an already-disabled button and the
+requirement was met without the lock doing anything. The test now wraps all three clicks in
+**one** `act()` block, which batches them so the button is still enabled for all three --
+the case the lock actually exists for: two clicks in the same task, before `disabled` has
+reached the DOM. With that, removing the lock fails the test.
+
+Worth remembering: a test can pass and still prove nothing, and the way to find out is to
+delete the thing it appears to cover.
+
+### Verification
+
+233 frontend tests across 7 files, **exit 0 with no unhandled errors**. `tsc --noEmit`
+clean. Build clean, 49 modules.
+
+Nine mutations caught by name, then reverted, baseline 23/23: `country` dropped from the
+export; `q` dropped; a date bound dropped; the competitor filter dropped;
+`provider_active` dropped; page and sort leaking into the export; the re-entrancy lock
+removed; a failed export still downloading; the error message showing the server body; and
+empty filters serialised as empty parameters.
+
+No `innerHTML` or `dangerouslySetInnerHTML`. The only outbound request is
+`GET /api/exports/ads.csv` -- no `/ads`, no `/ads/{id}`, no `/competitors`, no external
+URL, nothing sent anywhere.
+
+**Next (not started, needs approval):** the end-of-S3.3 document reconciliation, deferred
+since the step-6 checkpoint, and the S3.3 STOP checkpoint itself.

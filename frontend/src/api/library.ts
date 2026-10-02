@@ -14,8 +14,12 @@
  * support for.
  */
 
-import { request } from "./client";
+import { apiUrl, request } from "./client";
 import { truncateIdentifier } from "../components/provenance/format";
+import {
+  adsQueryToFilterParams,
+  type AdsQuery,
+} from "../components/library/adsQuery";
 import type { AdDetailOut, AdListOut, CompetitorListOut, SnapshotListOut } from "../types/api";
 
 // The default and maximum page sizes live in `components/library/adsQuery.ts` as
@@ -75,6 +79,39 @@ export function fetchSnapshots(
 ) {
   return request<SnapshotListOut>(`/ads/${encodeURIComponent(adId)}/snapshots`, {
     query: { page: paging.page, page_size: paging.pageSize },
+    ...(options.signal ? { signal: options.signal } : {}),
+  });
+}
+
+/**
+ * The CSV export URL for the current filters.
+ *
+ * Built from `adsQueryToFilterParams` -- the same serialiser the list request and the list
+ * URL use -- so "export what I filtered" cannot drift from "what I am looking at". The
+ * twelve filters go out; `page`, `page_size`, `sort` and `direction` do not, because the
+ * export endpoint does not accept them and a result set is not a page.
+ *
+ * With nothing filtered this is exactly `/api/exports/ads.csv` -- no `null`, no empty
+ * uuid, no `page=1`.
+ */
+export function adsCsvUrl(query: AdsQuery): string {
+  return apiUrl("/exports/ads.csv", Object.fromEntries(adsQueryToFilterParams(query)));
+}
+
+/**
+ * Fetch the export, and hand back the raw response.
+ *
+ * Deliberately **not** `request()`, which decodes JSON and throws on a non-2xx. The
+ * caller needs three things `request()` cannot give it: the status, the
+ * `Content-Disposition` filename, and the bytes. So this returns the `Response` and lets
+ * the caller decide, which is also why the caller is responsible for reporting failures
+ * rather than silently producing an empty file.
+ *
+ * The body is streamed by the server and read once, here, only when the request succeeded.
+ */
+export function fetchAdsCsv(url: string, options: FetchOptions = {}) {
+  return fetch(url, {
+    headers: { Accept: "text/csv" },
     ...(options.signal ? { signal: options.signal } : {}),
   });
 }

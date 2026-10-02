@@ -223,13 +223,22 @@ const PARAM = {
 } as const;
 
 /**
- * The request parameters, omitting everything at its default.
+ * The **filter** parameters, and nothing else.
  *
- * Omission is not tidiness. An empty filter must not become `country=` or `sort=`, and
- * the request layer already drops nullish values; doing it here means the URL and the
- * request are byte-identical, so what a person can share is exactly what was asked for.
+ * These twelve are exactly what `GET /exports/ads.csv` accepts -- provider,
+ * competitor_id, facebook_page_id, country, current_status, provider_active,
+ * data_origin, the four date bounds, and q -- and exactly what it does *not* accept
+ * beyond them: no paging, no sorting.
+ *
+ * This function is the single definition of "what is filtered". The list request, the URL
+ * and the CSV export all read it, rather than each building the set themselves. Two
+ * builders would be two things to keep in step, and the failure mode is the worst kind:
+ * an export that quietly drops a filter still produces a plausible-looking file, so
+ * "export what I filtered" would be false and nothing would look wrong.
+ *
+ * Omission is not tidiness. An empty filter must not become `country=` or `sort=`.
  */
-export function adsQueryToParams(query: AdsQuery): URLSearchParams {
+export function adsQueryToFilterParams(query: AdsQuery): URLSearchParams {
   const params = new URLSearchParams();
   const put = (key: string, value: string | number | undefined) => {
     if (value === undefined || value === "") return;
@@ -248,6 +257,25 @@ export function adsQueryToParams(query: AdsQuery): URLSearchParams {
   put(PARAM.firstSeenTo, query.firstSeenTo);
   put(PARAM.lastSeenFrom, query.lastSeenFrom);
   put(PARAM.lastSeenTo, query.lastSeenTo);
+
+  return params;
+}
+
+/**
+ * The full request parameters: every filter, plus sorting and paging.
+ *
+ * Built **on top of** {@link adsQueryToFilterParams} rather than beside it, so the filter
+ * set has exactly one definition and the two cannot drift.
+ *
+ * The list URL and the list request are byte-identical, so what a person can share is
+ * exactly what was asked for.
+ */
+export function adsQueryToParams(query: AdsQuery): URLSearchParams {
+  const params = adsQueryToFilterParams(query);
+  const put = (key: string, value: string | number | undefined) => {
+    if (value === undefined || value === "") return;
+    params.set(key, String(value));
+  };
 
   // Sorting and paging are omitted when they are the default, but `direction` on its own
   // is meaningful -- "sort by ad id ascending" is a real request -- so it is only omitted

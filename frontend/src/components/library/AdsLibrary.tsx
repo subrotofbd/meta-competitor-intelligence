@@ -40,6 +40,7 @@ import { buildDirectory, fetchAds, fetchCompetitors, type Directory } from "../.
 import { ApiError } from "../../api/client";
 import type { AdListOut, CompetitorListOut } from "../../types/api";
 import { AdsGrid } from "./AdsGrid";
+import { ExportButton } from "./ExportButton";
 import { ActiveFilters, FilterBar } from "./FilterBar";
 import {
   adsQueryFromParams,
@@ -244,6 +245,14 @@ export function AdsLibrary() {
           onPage={(page) => commit(withPage(query, page))}
         />
       ) : null}
+
+      {/*
+        Export sits with the results rather than above them: it exports *these* results, so
+        it belongs where the result count is. It is offered even when the list is empty --
+        an empty filtered result is still an export a person may want, and hiding the
+        control would make its absence ambiguous.
+      */}
+      <ExportButton query={query} />
     </section>
   );
 }
