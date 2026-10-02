@@ -21,7 +21,7 @@ import { render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { AdsLibrary } from "./AdsLibrary";
-import { COPY_NOT_IN_LIST_NOTE, NO_PLATFORMS_RECORDED } from "./AdsGrid";
+import { NO_PLATFORMS_RECORDED } from "./AdsGrid";
 import { LONG_RUNNING_TOOLTIP } from "../provenance/DurationSignal";
 import type { AdListOut, CompetitorListOut, AdListItemOut, ContextOut } from "../../types/api";
 
@@ -58,6 +58,15 @@ function item(overrides: Partial<AdListItemOut> = {}): AdListItemOut {
     contexts: [context()],
     media: [],
     platforms: ["facebook"],
+    // Always present in the real response, so the fixture always has it too. A fixture
+    // that omits a required field tests a shape the server never sends.
+    copy_fields: {
+      primary_text: "A kettle that actually whistles.",
+      headline: "Still whistling after 5,000 boils",
+      description: "Packaging claim, unchanged test method.",
+      cta: "SHOP_NOW",
+      destination_url: "https://aurora.example.invalid/kettle/box-copy",
+    },
     ...overrides,
   };
 }
@@ -171,14 +180,27 @@ describe("the Ad Library screen", () => {
 
   it("requests only /ads and /competitors, and nothing else", async () => {
     // The concrete risk is a grid that fans out to `/ads/{id}` per row, which would be
-    // one request per row and would pre-empt the detail screen.
-    const { requested } = mockApi({});
+    // one request per row and would pre-empt the detail screen. Step 6A exists so the
+    // copy arrives in the list response and this stays at two requests.
+    const { requested } = mockApi({
+      ads: () =>
+        json(
+          list([
+            item({ id: "ad-1", meta_ad_id: "mock-ad-1" }),
+            item({ id: "ad-2", meta_ad_id: "mock-ad-2" }),
+            item({ id: "ad-3", meta_ad_id: "mock-ad-3" }),
+          ]),
+        ),
+    });
     render(<AdsLibrary />);
 
-    await waitFor(() => expect(screen.getByTestId("ad-row")).toBeDefined());
+    await waitFor(() => expect(screen.getAllByTestId("ad-row")).toHaveLength(3));
 
+    // Three rows, still two requests. A per-row copy fetch would make this five.
+    expect(requested).toHaveLength(2);
     const paths = requested.map((u) => u.split("?")[0]).sort();
     expect(paths).toEqual(["/api/ads", "/api/competitors"]);
+    // Explicitly: no detail endpoint, for any row.
     expect(requested.some((u) => u.includes("/api/ads/"))).toBe(false);
     // And nothing absolute: no origin, no host, no port.
     expect(requested.every((u) => u.startsWith("/api/"))).toBe(true);
@@ -555,17 +577,91 @@ describe("what the grid must never show", () => {
     expect(text).not.toContain("not available yet");
   });
 
-  it("states that copy text is absent, rather than leaving empty columns unexplained", async () => {
-    // `AdListItemOut` carries no copy fields. An unexplained column of em dashes reads
-    // as a bug or as data we lost; the note says the endpoint does not carry copy.
+  it("shows the copy the list response carries", async () => {
+    // Step 6A closed the gap this grid used to have. The copy arrives in `/ads` itself,
+    // so the row can say what the ad says without a second request.
     mockApi({ ads: () => json(list([item()])) });
     render(<AdsLibrary />);
     await screen.findByTestId("ad-row");
 
-    expect(screen.getByText(COPY_NOT_IN_LIST_NOTE)).toBeDefined();
-    // The column header exists in the DOM even though the header row is visually
-    // hidden below `lg` -- so the column is labelled on every screen size.
-    expect(screen.getAllByText("Copy").length).toBeGreaterThan(0);
+    const copy = screen.getByTestId("copy-preview");
+    expect(copy.textContent).toContain("A kettle that actually whistles.");
+    expect(copy.textContent).toContain("Still whistling after 5,000 boils");
+    expect(copy.textContent).toContain("CTA: SHOP_NOW");
+  });
+
+  it("truncates long copy visually but keeps the full text in the DOM", async () => {
+    // `line-clamp`, not a JavaScript cut. Truncating the string would hand a screen
+    // reader and a copy-paste a sentence with no ending.
+    const long = "word ".repeat(200).trim();
+    mockApi({
+      ads: () => json(list([item({ copy_fields: { ...item().copy_fields!, primary_text: long } })])),
+    });
+    const { container } = render(<AdsLibrary />);
+    await screen.findByTestId("ad-row");
+
+    const primary = screen.getByTestId("copy-preview").firstElementChild as HTMLElement;
+    expect(primary.className).toContain("line-clamp-2");
+    // Nothing removed from the text itself.
+    expect(primary.textContent).toBe(long);
+    expect(container.textContent).toContain(long.slice(-40));
+  });
+
+  it("renders null copy fields as an em dash, never as empty text", async () => {
+    mockApi({
+      ads: () =>
+        json(
+          list([
+            item({
+              copy_fields: {
+                primary_text: null,
+                headline: null,
+                description: null,
+                cta: null,
+                destination_url: null,
+              },
+            }),
+          ]),
+        ),
+    });
+    const { container } = render(<AdsLibrary />);
+    await screen.findByTestId("ad-row");
+
+    const copy = screen.getByTestId("copy-preview");
+    expect(copy.textContent).toContain("\u2014");
+    expect(copy.textContent).toContain("provider reported no text");
+    // Never N/A, never the word null, never a fabricated placeholder string.
+    const text = (container.textContent ?? "").toLowerCase();
+    expect(text).not.toContain("n/a");
+    expect(text).not.toContain("unknown");
+  });
+
+  it("distinguishes never-observed from the provider reporting no text", async () => {
+    // `copy_fields: null` means the ad has no snapshot. A copy object whose fields are
+    // all null means the provider sent none. Collapsing the two would be a false claim.
+    mockApi({ ads: () => json(list([item({ copy_fields: null })])) });
+    render(<AdsLibrary />);
+    await screen.findByTestId("ad-row");
+
+    expect(screen.getByTestId("copy-absent").textContent).toBe("not observed yet");
+    expect(screen.queryByTestId("copy-preview")).toBeNull();
+  });
+
+  it("renders provider copy as plain text, never as markup", async () => {
+    // Ad copy is provider-supplied free text and goes through SafeText. A future edit
+    // that reached for dangerouslySetInnerHTML turns this red.
+    const hostile = '<script>globalThis.__pwned=1</script><img src=x onerror=alert(1)>';
+    mockApi({
+      ads: () =>
+        json(list([item({ copy_fields: { ...item().copy_fields!, primary_text: hostile } })])),
+    });
+    const { container } = render(<AdsLibrary />);
+    await screen.findByTestId("ad-row");
+
+    expect(container.querySelector("script")).toBeNull();
+    expect(container.querySelector("img")).toBeNull();
+    expect(screen.getByTestId("copy-preview").textContent).toContain(hostile);
+    expect((globalThis as Record<string, unknown>)["__pwned"]).toBeUndefined();
   });
 
   it("does not count anything as a ranking", async () => {

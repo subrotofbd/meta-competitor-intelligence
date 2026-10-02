@@ -242,6 +242,11 @@ def _list_item_out(record: AdRecord) -> AdListItemOut:
         contexts=_contexts_out(record),
         media=_media_out(record),
         platforms=snapshot_platforms(record.snapshot),
+        # Read from the snapshot `ad_query` already batch-loaded for this page. No extra
+        # query and no per-row fetch: `ad_query` selects every latest snapshot for the
+        # page in a single batched query, and `normalized` is the append-only evidence
+        # read exactly as stored. No hash is recomputed.
+        copy_fields=_copy_fields_out(record.snapshot),
     )
 
 

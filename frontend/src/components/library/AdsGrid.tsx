@@ -20,17 +20,21 @@
  * wide, visible again on a desktop. Competitor, context, duration, last-seen and
  * provenance never drop -- they are what the page is for.
  *
- * ## The copy columns are empty, and that is honest
+ * ## Copy comes from the list response
  *
- * `AdListItemOut` has **no** copy fields. `primary_text`, `headline`, `description` and
- * `cta` exist only on `AdDetailOut`. There is no field on this row to read them from,
- * and inventing one, or fetching `/ads/{id}` per row to fill it, would both be wrong --
- * the first by fabricating, the second by pre-empting the detail screen with a request
- * storm.
+ * As of S3.3 step 6A `AdListItemOut` carries `copy_fields`, read by the backend from the
+ * latest snapshot it had already batch-loaded for the page. The grid therefore shows what
+ * an ad actually says without issuing a `/ads/{id}` request per row -- the two requests
+ * this screen makes are still just `/ads` and `/competitors`.
  *
- * So the column renders `—` and says so, once, underneath the grid. That is the honest
- * state: the list endpoint does not carry copy text. When the backend adds it, the
- * column fills in with no change here beyond reading the new field.
+ * Truncation is **visual only**: `line-clamp` hides the overflow and the full string
+ * stays in the DOM. Truncating in JavaScript would put a cut-off sentence in front of a
+ * screen reader and in a copy-paste, and would throw away text the reader may actually
+ * want.
+ *
+ * Every field goes through `SafeText`. Ad copy is provider-supplied free text, and the
+ * rule for it is the same as for every other string on this screen: plain text, never
+ * markup.
  */
 
 import type { ReactNode } from "react";
@@ -46,13 +50,6 @@ import type { AdListItemOut, AdListOut, ContextOut } from "../../types/api";
 
 /** Shown when `platforms` is `[]`. Never a guess at what the ad ran on. */
 export const NO_PLATFORMS_RECORDED = "none recorded";
-
-/**
- * Explains the empty copy columns. Once, for the whole grid -- repeating it per row
- * would make the grid harder to read than saying nothing.
- */
-export const COPY_NOT_IN_LIST_NOTE =
-  "Copy text is not part of the ads list response. It is served by the ad detail endpoint.";
 
 type Props = {
   readonly ads: AdListOut;
@@ -73,7 +70,7 @@ export function AdsGrid({ ads, directory }: Props) {
             per-cell labels instead -- a header row above a stacked card is noise. */}
         <div
           role="row"
-          className="hidden lg:grid lg:grid-cols-[minmax(0,1.3fr)_minmax(0,1.7fr)_minmax(0,0.9fr)_minmax(0,1.6fr)_minmax(0,1fr)_minmax(0,0.9fr)_auto] lg:gap-4 lg:border-b lg:border-slate-200 lg:pb-2 lg:text-xs lg:font-semibold lg:uppercase lg:tracking-wide lg:text-slate-500 dark:lg:border-slate-800"
+          className="hidden lg:grid lg:grid-cols-[minmax(0,1.3fr)_minmax(0,1.7fr)_minmax(0,0.9fr)_minmax(0,1.8fr)_minmax(0,1fr)_minmax(0,0.9fr)_auto] lg:gap-4 lg:border-b lg:border-slate-200 lg:pb-2 lg:text-xs lg:font-semibold lg:uppercase lg:tracking-wide lg:text-slate-500 dark:lg:border-slate-800"
         >
           <span role="columnheader">Competitor / Page</span>
           <span role="columnheader">Context &amp; status</span>
@@ -88,8 +85,6 @@ export function AdsGrid({ ads, directory }: Props) {
           <AdRow key={ad.id} ad={ad} directory={directory} />
         ))}
       </div>
-
-      <p className="text-xs text-slate-500 dark:text-slate-400">{COPY_NOT_IN_LIST_NOTE}</p>
     </div>
   );
 }
@@ -134,14 +129,10 @@ function AdRow({ ad, directory }: { ad: AdListItemOut; directory: Directory }) {
         <Platforms ad={ad} />
       </div>
 
-      {/* 4. Copy -- empty by contract, see the module docstring */}
+      {/* 4. Copy -- what the ad actually says */}
       <div role="cell" className={`${CELL} max-md:block md:hidden lg:block`}>
         <CellLabel>Copy</CellLabel>
-        <div className="flex flex-col gap-0.5">
-          <NullValue value={null} />
-          <NullValue value={null} />
-          <NullValue value={null} />
-        </div>
+        <CopyPreview copyFields={ad.copy_fields} />
       </div>
 
       {/* 5. Duration */}
@@ -161,6 +152,72 @@ function AdRow({ ad, directory }: { ad: AdListItemOut; directory: Directory }) {
         <CellLabel>Provenance</CellLabel>
         <DataOriginBadge origin={ad.data_origin} />
       </div>
+    </div>
+  );
+}
+
+/**
+ * What the ad says.
+ *
+ * `primary_text` leads because it is the body of the ad; the headline and CTA sit under
+ * it as the smaller signals, and the description last. `line-clamp` caps the height and
+ * the full text stays in the DOM -- see the module docstring on why truncation is
+ * visual only.
+ *
+ * A `null` `copyFields` and a `copyFields` whose four fields are all null are different
+ * statements -- "never observed" versus "the provider reported no text" -- so the first
+ * says so in words and the second renders dashes.
+ */
+function CopyPreview({ copyFields }: { copyFields: AdListItemOut["copy_fields"] }) {
+  if (copyFields === null) {
+    return (
+      <span className="text-xs text-slate-500 dark:text-slate-400" data-testid="copy-absent">
+        not observed yet
+      </span>
+    );
+  }
+
+  const { primary_text, headline, description, cta } = copyFields;
+  const nothingReported =
+    primary_text === null && headline === null && description === null && cta === null;
+
+  return (
+    <div className="flex min-w-0 flex-col gap-0.5" data-testid="copy-preview">
+      {primary_text === null ? (
+        <NullValue value={null} />
+      ) : (
+        <SafeText
+          value={primary_text}
+          className="line-clamp-2 text-sm leading-snug"
+        />
+      )}
+
+      {headline === null && description === null && cta === null && nothingReported ? (
+        // All four absent: one dash, not four.
+        <span className="text-xs text-slate-400 dark:text-slate-500">
+          provider reported no text
+        </span>
+      ) : null}
+
+      {headline === null ? null : (
+        <SafeText
+          value={headline}
+          className="line-clamp-1 text-xs text-slate-600 dark:text-slate-300"
+        />
+      )}
+
+      {description === null ? null : (
+        <SafeText
+          value={description}
+          className="line-clamp-1 text-xs text-slate-500 dark:text-slate-400"
+        />
+      )}
+
+      {cta === null ? null : (
+        <span className="mt-0.5 inline-flex">
+          <span className="badge badge--neutral">{`CTA: ${cta}`}</span>
+        </span>
+      )}
     </div>
   );
 }

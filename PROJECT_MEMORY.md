@@ -3057,3 +3057,97 @@ phrased as a ranking; a ROAS column header; a spend value in a cell.
 
 **Next (not started, needs approval):** ad detail. The copy gap above is the blocker to
 settle first.
+
+---
+
+## 2026-10-02, S3.3 step 6A -- copy preview in the ads list
+
+Closes the contract gap step 6 reported. **No migration, no N+1, no new endpoint.**
+
+### The change, in two lines
+
+`backend/app/schemas/ads.py` -- `AdListItemOut` gains `copy_fields: CopyFieldsOut | None`.
+`backend/app/api/ads.py` -- `_list_item_out` passes `copy_fields=_copy_fields_out(record.snapshot)`.
+
+That is the whole implementation. `_copy_fields_out` already existed for the detail and
+snapshot responses, so the three responses share one shape and cannot drift.
+
+### Why it costs nothing
+
+`ad_query._load_records` selects every page's latest snapshots in **one batched query**
+("1. Latest snapshots, one query for the page"). The change reads `normalized` off an
+object that is already loaded -- no lazy load, no attribute access that defers a query.
+
+Measured, not assumed. Counting real SQL statements at page sizes 1 / 5 / 25 / 100:
+
+| page_size | rows | queries (before) | queries (after) |
+|---|---|---|---|
+| 1 | 1 | 4 | 4 |
+| 5 | 5 | 4 | 4 |
+| 25 | 8 | 4 | 4 |
+| 100 | 8 | 4 | 4 |
+
+Flat, and identical before and after (verified by stashing the change and re-running).
+
+### Nullability differs on purpose
+
+`copy_fields` is nullable on a list item and **not** nullable on a snapshot row. A list
+item can belong to an ad that has no snapshot yet; a snapshot row exists by definition.
+`test_the_list_uses_the_same_copy_shape_as_the_detail_response` asserts the inner shape
+is `CopyFieldsOut` in all three, and asserts the nullability difference rather than
+papering over it.
+
+### The 18 pre-existing failures are still 18
+
+`test_api_ads.py` fails 18 tests **at HEAD** because the development database is seeded
+and those tests assume an empty corpus. Verified by stashing: the failure set before and
+after this change is byte-identical, and passing went 100 -> 112.
+
+The step 6A tests are written **not** to assume an empty corpus: each locates its own
+rows by id and asserts on those, and pagination walks every page rather than asserting a
+total. A test that only passes against an empty database has never met real data.
+
+### A silent-failure trap worth remembering
+
+`ASGITestClient.get` takes query parameters as **kwargs**. Passing `params={...}` is
+*silently swallowed* -- not rejected -- and the endpoint falls back to its defaults. Two
+of these tests were initially asserting against page one over and over while looking
+like they were testing pagination. Six of my first drafts failed this way.
+
+### Backend tests: 12 added
+
+Copy from the latest snapshot and not an earlier one; null fields stay null; an ad with
+no snapshot reports `copy_fields: null`; copy costs no extra queries (measured at the
+HTTP endpoint, so assembly is included, compared across two different page sizes so
+"equal" cannot be an accident); the list needs no detail request; pagination still yields
+one row per ad; search and filters still work; `extra="forbid"` still holds; no AI or
+performance field rode along; one shared copy shape; no new route.
+
+Mutation-checked: dropping `copy_fields` fails 9 tests; defaulting null copy to empty
+strings fails the no-snapshot test.
+
+### Frontend
+
+`AdListItemOut.copy_fields` in `types/api.ts`; a `CopyPreview` cell in `AdsGrid.tsx`.
+`primary_text` leads (line-clamped to 2), then headline, description, and a `CTA:` badge.
+**Truncation is visual only** -- `line-clamp`, full text stays in the DOM, because
+truncating in JavaScript hands a screen reader and a copy-paste a sentence with no
+ending. `line-clamp-1`/`-2` verified present in the built CSS.
+
+`copy_fields: null` renders "not observed yet"; an object with all four fields null
+renders dashes plus "provider reported no text". Those are different statements and
+collapsing them would be a false claim.
+
+`COPY_NOT_IN_LIST_NOTE` and its test are **deleted** -- they documented a gap that no
+longer exists, and leaving them would have been a comment that lies.
+
+90 frontend tests pass (30 in this file). Build clean, 39 modules.
+
+### Gates
+
+ruff clean, format clean, project-gate mypy clean (58 files), `mypy backend` **59,
+unchanged** (one new `var-annotated` error was fixed rather than absorbed),
+`alembic check` no drift, single head `0011_api_search_indexes`. **No migration.**
+
+Database untouched and re-verified: `ads` 8, `ad_snapshots` 8, `collection_runs` 3,
+`ad_analysis` 0 -- identical to step 6.

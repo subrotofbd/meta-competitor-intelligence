@@ -172,8 +172,8 @@ class AnalysisOut(_Response):
 class AdListItemOut(_Response):
     """One ad in a list response.
 
-    Identity, provenance, the current observation, the longevity signal, and every
-    status context. Deliberately no `current_status`: see the module docstring.
+    Identity, provenance, the current observation, the copy, the longevity signal, and
+    every status context. Deliberately no `current_status`: see the module docstring.
     """
 
     id: uuid.UUID
@@ -194,6 +194,23 @@ class AdListItemOut(_Response):
     #: recorded as nothing. `tuple` rather than `list` for consistency with
     #: `contexts` and `media`; it serialises to a JSON array either way.
     platforms: tuple[str, ...] = ()
+    #: The copy of the **latest** snapshot, verbatim from `normalized`.
+    #:
+    #: Added at S3.3 step 6A. A competitor-research grid that cannot show what an ad
+    #: says is not much use, and the alternative was a client fetching `/ads/{id}` per
+    #: row -- one request per row to read a document the list query has *already*
+    #: loaded. `ad_query` selects every page's latest snapshots in a single batched
+    #: query, so this costs no additional round trip at all.
+    #:
+    #: `null` when the ad has no snapshot yet, which is a real state for an ad row that
+    #: exists before its first observation is written. Individual fields inside stay
+    #: `null` when the provider reported no text, which is not the same thing and is not
+    #: filled with a placeholder.
+    #:
+    #: The **same** `CopyFieldsOut` the detail and snapshot responses use, so the three
+    #: cannot drift. It carries `destination_url` as well; that field already belongs to
+    #: the approved copy contract and no client is required to render it.
+    copy_fields: CopyFieldsOut | None
 
 
 class AdListOut(_Response):

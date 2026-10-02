@@ -300,6 +300,18 @@ export interface AdListItemOut {
    * "this ad ran nowhere". A provider that reports nothing is recorded as nothing.
    */
   readonly platforms: readonly string[];
+  /**
+   * The copy of the **latest** snapshot, verbatim from the provider.
+   *
+   * Added at S3.3 step 6A so a grid row can show what an ad actually says. The backend
+   * reads it out of the snapshot it had *already* loaded for the row, so a list page
+   * costs the same number of requests it did before -- there is no `/ads/{id}` call per
+   * row.
+   *
+   * `null` means the ad has no snapshot yet, which is different from a snapshot whose
+   * fields are all null. The two are kept distinct on both sides of the wire.
+   */
+  readonly copy_fields: CopyFieldsOut | null;
 }
 
 /**

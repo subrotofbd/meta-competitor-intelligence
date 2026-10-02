@@ -1723,3 +1723,355 @@ def test_an_unhandled_failure_returns_500_with_no_traceback(
 def test_a_malformed_uuid_is_a_422_not_a_500(db_session: Session) -> None:
     """422: the request could not be parsed at all, as distinct from a bad value."""
     assert _client(db_session).get("/ads/not-a-uuid").status_code == 422
+
+
+# ============================================================
+
+
+# ============================================================
+# S3.3 step 6A -- copy preview in the list
+#
+# `AdListItemOut` gained `copy_fields`. The alternative was a client fetching
+# `/ads/{id}` per row, so most of what follows is about proving that did not happen and
+# that the null rules survived.
+#
+# ## These tests do not assume an empty corpus
+#
+# This file's older tests do, and 18 of them fail against a seeded development
+# database -- a pre-existing condition, not something step 6A introduced. The tests here
+# are written differently on purpose: each one locates **its own** rows by id and asserts
+# on those, and any absolute count is expressed as a relationship rather than a number.
+# A test that only passes against an empty database is a test that has never been run
+# against real data.
+# ============================================================
+
+
+# `ASGITestClient.get` takes query parameters as **kwargs**, not a `params=` mapping.
+# A `params=` argument is silently swallowed -- not rejected -- and the endpoint
+# falls back to its defaults, which is how a paging assertion ends up checking page
+# one over and over.
+def _items_by_id(body: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    return {item["id"]: item for item in body["items"]}
+
+
+def test_the_list_carries_the_copy_of_the_latest_snapshot(db_session: Session) -> None:
+    """A competitor-research grid that cannot show what an ad says is not much use."""
+    page = _page(db_session, "page-a")
+    ad, _ = _observe(
+        db_session,
+        page_id=page.id,
+        external_ad_id="copy-ad-1",
+        primary_text="Six months of mornings, in ninety seconds.",
+        headline="A lid that sounds like 6am",
+        description="Filmed over six months.",
+        cta="WATCH_MORE",
+    )
+    _add_context(db_session, ad_id=ad.id, page_id=page.id)
+
+    item = _items_by_id(_client(db_session).get("/ads").json())[str(ad.id)]
+    assert item["copy_fields"] == {
+        "primary_text": "Six months of mornings, in ninety seconds.",
+        "headline": "A lid that sounds like 6am",
+        "description": "Filmed over six months.",
+        "cta": "WATCH_MORE",
+        "destination_url": None,
+    }
+
+
+def test_copy_comes_from_the_latest_snapshot_and_not_an_earlier_one(db_session: Session) -> None:
+    """The grid shows what the ad says *now*, not what it once said.
+
+    Both observations are still stored -- `ad_snapshots` is append-only and nothing here
+    rewrites a row. This asserts only which one the list reads.
+    """
+    page = _page(db_session, "page-a")
+    ad, _ = _observe(
+        db_session, page_id=page.id, external_ad_id="copy-ad-2", primary_text="The first wording."
+    )
+    _add_context(db_session, ad_id=ad.id, page_id=page.id)
+
+    _observe(
+        db_session,
+        page_id=page.id,
+        external_ad_id="copy-ad-2",
+        primary_text="The second wording.",
+        offset_days=10,
+    )
+
+    item = _items_by_id(_client(db_session).get("/ads").json())[str(ad.id)]
+    assert item["copy_fields"]["primary_text"] == "The second wording."
+
+
+def test_copy_fields_stay_null_rather_than_being_defaulted(db_session: Session) -> None:
+    """A provider that reported no text must not become `""` or a placeholder.
+
+    `copy_fields` is a *present* object whose fields are null -- a different statement
+    from `copy_fields: null`, which means there is no snapshot at all.
+    """
+    page = _page(db_session, "page-a")
+    ad, _ = _observe(
+        db_session,
+        page_id=page.id,
+        external_ad_id="copy-ad-3",
+        primary_text=None,
+        headline=None,
+        description=None,
+        cta=None,
+    )
+    _add_context(db_session, ad_id=ad.id, page_id=page.id)
+
+    item = _items_by_id(_client(db_session).get("/ads").json())[str(ad.id)]
+    assert item["copy_fields"] is not None
+    assert item["copy_fields"] == {
+        "primary_text": None,
+        "headline": None,
+        "description": None,
+        "cta": None,
+        "destination_url": None,
+    }
+
+
+def test_an_ad_with_no_snapshot_reports_no_copy_at_all(db_session: Session) -> None:
+    """`null` here means "never observed", which is not "the provider said nothing"."""
+    from app.models.ads import Ad
+    from app.providers.data.provenance import DataOrigin
+
+    page = _page(db_session, "page-a")
+    ad = Ad(
+        provider=PROVIDER,
+        meta_ad_id="copy-ad-never-seen",
+        data_origin=DataOrigin.third_party,
+        first_seen_at=BASE,
+        last_seen_at=BASE,
+    )
+    db_session.add(ad)
+    db_session.flush()
+    _add_context(db_session, ad_id=ad.id, page_id=page.id)
+
+    item = _items_by_id(_client(db_session).get("/ads").json())[str(ad.id)]
+    assert item["latest_snapshot"] is None
+    assert item["copy_fields"] is None
+
+
+def test_copy_in_the_list_costs_no_extra_queries(db_session: Session) -> None:
+    """The anti-N+1 assertion, measured at the endpoint so assembly is included.
+
+    The service-level test above covers `list_ads`. This one goes through HTTP, so it
+    also counts anything `_list_item_out` might do -- and reading copy out of a snapshot
+    that is already loaded is exactly the kind of change that could quietly reintroduce
+    a query per row.
+
+    The two page sizes are compared to each other rather than to a fixed number, so the
+    assertion is about the *shape* of the cost, not about the size of a particular
+    corpus.
+    """
+    page = _page(db_session, "page-a")
+    for index in range(6):
+        ad, _ = _observe(db_session, page_id=page.id, external_ad_id=f"copy-nplus1-{index}")
+        _add_context(db_session, ad_id=ad.id, page_id=page.id)
+
+    client = _client(db_session)
+    bind = db_session.get_bind()
+    counts: list[int] = []
+    sizes: list[int] = []
+
+    for size in (1, 25):
+
+        class _Counter:
+            def __init__(self) -> None:
+                self.queries: list[None] = []
+
+            def __call__(self, *args: Any, **kwargs: Any) -> None:
+                self.queries.append(None)
+
+        counter = _Counter()
+        event.listen(bind, "before_cursor_execute", counter)
+        try:
+            response = client.get("/ads", page_size=size)
+        finally:
+            event.remove(bind, "before_cursor_execute", counter)
+
+        assert response.status_code == 200
+        sizes.append(len(response.json()["items"]))
+        counts.append(len(counter.queries))
+
+    # A real page was compared against a larger one, so "equal counts" cannot be an
+    # accident of both pages being the same size.
+    assert sizes[1] > sizes[0], sizes
+    # Flat. A per-row copy fetch would make the bigger page cost strictly more.
+    assert counts[0] == counts[1], counts
+
+
+def test_the_list_needs_no_detail_request(db_session: Session) -> None:
+    """One request, and its payload is already complete.
+
+    This is the requirement that pushed the change into the backend: a grid that fetched
+    `/ads/{id}` per row would issue `page_size + 1` requests.
+    """
+    page = _page(db_session, "page-a")
+    ad, _ = _observe(db_session, page_id=page.id, external_ad_id="copy-ad-4", cta="SHOP_NOW")
+    _add_context(db_session, ad_id=ad.id, page_id=page.id)
+
+    response = _client(db_session).get("/ads")
+    assert response.status_code == 200
+    item = _items_by_id(response.json())[str(ad.id)]
+
+    # Everything a grid row renders is present in this single response.
+    assert item["copy_fields"]["cta"] == "SHOP_NOW"
+    assert item["data_origin"] == "third_party"
+    assert item["platforms"] == ["facebook"]
+    assert item["contexts"][0]["current_status"] is not None
+    # And nothing on a list row needs a second call to be understood.
+    assert "analysis" not in item
+
+
+def test_pagination_still_returns_one_row_per_ad(db_session: Session) -> None:
+    """The new field must not turn one ad into more than one row, or fewer.
+
+    Walked across every page rather than asserting a total, so the assertion holds
+    whatever else is in the corpus.
+    """
+    page = _page(db_session, "page-a")
+    mine: list[str] = []
+    for index in range(5):
+        ad, _ = _observe(db_session, page_id=page.id, external_ad_id=f"copy-page-{index}")
+        _add_context(db_session, ad_id=ad.id, page_id=page.id)
+        mine.append(str(ad.id))
+
+    client = _client(db_session)
+    seen: list[str] = []
+    page_number = 1
+    while True:
+        body = client.get("/ads", page_size=2, page=page_number).json()
+        if not body["items"]:
+            break
+        seen.extend(item["id"] for item in body["items"])
+        page_number += 1
+        assert page_number < 50, "pagination did not terminate"
+
+    # No duplicates anywhere, so no ad was split across rows.
+    assert len(seen) == len(set(seen))
+    # And every ad this test created appeared exactly once.
+    for ad_id in mine:
+        assert seen.count(ad_id) == 1, ad_id
+
+
+def test_search_and_filters_still_work_with_copy_in_the_list(db_session: Session) -> None:
+    """The copy field is additive; it must not change what matches.
+
+    A token unique to this test is used so the assertion is about these rows and not
+    about whatever the corpus already contained.
+    """
+    page = _page(db_session, "page-a")
+    kettle, _ = _observe(
+        db_session,
+        page_id=page.id,
+        external_ad_id="copy-search-kettle",
+        primary_text="zzuniquetokenzz a kettle that whistles.",
+    )
+    gym, _ = _observe(
+        db_session,
+        page_id=page.id,
+        external_ad_id="copy-search-gym",
+        primary_text="zzuniquetokenzz nobody joins a gym on a Monday.",
+        countries=("GB",),
+    )
+    _add_context(db_session, ad_id=kettle.id, page_id=page.id)
+    _add_context(db_session, ad_id=gym.id, page_id=page.id, country="GB")
+
+    client = _client(db_session)
+
+    found = client.get("/ads", q="zzuniquetokenzz").json()
+    found_ids = {item["id"] for item in found["items"]}
+    assert str(kettle.id) in found_ids
+    assert str(gym.id) in found_ids
+    assert len(found_ids) == 2
+    # And the copy came back on the row the search matched.
+    assert _items_by_id(found)[str(kettle.id)]["copy_fields"]["primary_text"] == (
+        "zzuniquetokenzz a kettle that whistles."
+    )
+
+    by_country = client.get("/ads", country="GB").json()
+    assert str(gym.id) in {item["id"] for item in by_country["items"]}
+    assert str(kettle.id) not in {item["id"] for item in by_country["items"]}
+
+    by_origin = client.get("/ads", data_origin="third_party").json()
+    assert str(kettle.id) in {item["id"] for item in by_origin["items"]}
+
+
+def test_the_list_schema_still_forbids_an_unexpected_field(db_session: Session) -> None:
+    """`extra="forbid"` is the point of `_Response`, and this field is no exception."""
+    from pydantic import ValidationError
+
+    from app.schemas.ads import AdListItemOut
+
+    base: dict[str, Any] = {
+        "id": "11111111-1111-4111-8111-111111111111",
+        "provider": PROVIDER,
+        "meta_ad_id": "ad-1",
+        "data_origin": "third_party",
+        "first_seen_at": BASE.isoformat(),
+        "last_seen_at": BASE.isoformat(),
+        "latest_snapshot": None,
+        "duration": None,
+        "contexts": [],
+        "copy_fields": None,
+    }
+    assert AdListItemOut.model_validate(base).meta_ad_id == "ad-1"
+
+    with pytest.raises(ValidationError):
+        # Nothing in `AdListItemOut` declares this. A column added to a table must never
+        # reach a client by accident.
+        AdListItemOut.model_validate({**base, "roas": 4.2})
+
+
+def test_the_list_contract_carries_no_ai_or_performance_field(db_session: Session) -> None:
+    """The gap that was closed is copy. Nothing else may ride along with it."""
+    from app.schemas.ads import AdListItemOut
+
+    declared = set(AdListItemOut.model_fields)
+    assert "copy_fields" in declared
+    assert "analysis" not in declared
+    assert declared.isdisjoint(
+        {"roas", "spend", "budget", "cpa", "cpc", "cpm", "leads", "sales", "revenue", "clicks"}
+    )
+
+
+def test_the_list_uses_the_same_copy_shape_as_the_detail_response() -> None:
+    """One `CopyFieldsOut`, so the three responses cannot drift apart.
+
+    The **nullability differs on purpose**, and the test says so rather than papering
+    over it: a list item can belong to an ad that has no snapshot yet, so its
+    `copy_fields` is `null`. A snapshot row exists by definition, so its `copy_fields` is
+    always an object -- an all-null one when the provider reported nothing. The shape
+    inside is identical, which is the invariant that matters.
+    """
+    from typing import get_args
+
+    from app.schemas.ads import AdDetailOut, AdListItemOut, CopyFieldsOut, SnapshotListItemOut
+
+    def inner(annotation: Any) -> Any:
+        """The non-`None` member of a `X | None` annotation."""
+        return next((arg for arg in get_args(annotation) if arg is not type(None)), annotation)
+
+    assert inner(AdListItemOut.model_fields["copy_fields"].annotation) is CopyFieldsOut
+    assert inner(AdDetailOut.model_fields["copy_fields"].annotation) is CopyFieldsOut
+    assert inner(SnapshotListItemOut.model_fields["copy_fields"].annotation) is CopyFieldsOut
+
+    # Null only where "not observed yet" is a real state.
+    assert type(None) in get_args(AdListItemOut.model_fields["copy_fields"].annotation)
+    assert type(None) in get_args(AdDetailOut.model_fields["copy_fields"].annotation)
+    assert type(None) not in get_args(SnapshotListItemOut.model_fields["copy_fields"].annotation)
+
+
+def test_no_new_route_was_added_for_copy(db_session: Session) -> None:
+    """The gap was closed inside the list, not with another endpoint.
+
+    A client that needed `/ads/copy` or a bulk-copy route would be back to N+1 in a
+    different shape.
+    """
+    # The LOCAL app, not `app.main.app`: that one is built for production and has its
+    # routes behind the docs gate.
+    paths = set(create_app(app_env=AppEnv.LOCAL).openapi()["paths"])
+    assert "/ads" in paths
+    assert not any("copy" in path for path in paths), sorted(paths)
