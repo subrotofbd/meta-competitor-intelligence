@@ -468,17 +468,22 @@ def test_the_seed_writes_no_metric_and_no_verdict_column_itself() -> None:
 # ============================================================
 
 
-def test_the_analysis_fixture_keys_could_never_be_stored(db_session: Session) -> None:
-    """The reason there is no `--with-ai` flag, asserted rather than asserted-in-prose.
+def test_the_analysis_fixture_keys_are_now_real_storeable_digests(db_session: Session) -> None:
+    """S3.3 step 3 fixed exactly what this test used to assert was broken.
 
-    `ad_analysis.copy_hash` carries `CHECK (copy_hash ~ '^[0-9a-f]{64}$')`, so these
-    placeholder keys can never satisfy it. `MockAIProvider` would miss on every real
-    digest and return its all-null analysis.
+    It previously asserted that **no** key could satisfy `ad_analysis.copy_hash`'s
+    64-hex `CHECK`, which was true, and was the reason the seed ships no `--with-ai`
+    flag. The fixture is now keyed by real digests computed with production
+    `copy_hash_v1`, so an analysis can be stored and found.
+
+    The flag is still absent: that is now a **scope decision**, not an obstacle, and
+    adding it belongs to a step that has not been authorised. The proof that the keys
+    match production lives in `test_ai_fixture_keys.py`.
     """
     fixtures = json.loads(ANALYSES.read_text(encoding="utf-8"))
     assert fixtures["responses"], "the analysis fixture must not be empty"
     for key in fixtures["responses"]:
-        assert not re.fullmatch(r"[0-9a-f]{64}", key), key
+        assert re.fullmatch(r"[0-9a-f]{64}", key), key
 
 
 def test_there_is_no_with_ai_flag_and_no_ai_import() -> None:

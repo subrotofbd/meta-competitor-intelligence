@@ -1,8 +1,8 @@
 {
   "analysis_version": "mock-v1",
-  "description": "Stored analyses for the MockAIProvider, keyed by copy_hash. Invented copy and invented interpretations; no real advertiser, no model output, no performance claim of any kind.",
+  "description": "Stored analyses for the MockAIProvider, keyed by copy_hash. Invented copy and invented interpretations; no real advertiser, no model output, no performance claim of any kind.\n\nThe keys are REAL copy_hash digests, computed from tests/fixtures/ad_provider/corpus.json with the production normaliser and services.copy_hash.copy_hash_v1. They were placeholders before, which could never be stored -- ad_analysis.copy_hash requires 64 lowercase hex -- so every lookup missed and the mock returned its all-null analysis. Derive them with tests/corpus_hashes.corpus_copy_hash(ad_id); never hand-write one.",
   "responses": {
-    "mock-copy-hash-en-001": {
+    "b62dc7a3e20d0dc0661c89f14fb38797fb538876fbd2995cb56c0ba4e1a07830": {
       "hook": "Opens by naming a failure the reader has already had: a kettle that stops whistling.",
       "problem": "Kettles that fail within a year, leaving the reader with an appliance that looks fine and silently does not.",
       "promise": "A kettle still in working order after years of daily use.",
@@ -20,7 +20,7 @@
       "language": "en",
       "confidence": "high"
     },
-    "mock-copy-hash-hi-001": {
+    "96b6a5bb699117b86635268e195925b73f1569013957d64150285ee2b0b16eae": {
       "hook": "Names the three plants in the headline itself, before any body copy runs.",
       "problem": "Ayurvedic products whose ingredient lists are hard to find, buried on a back label.",
       "promise": "The ingredients are stated up front, on the front of the pack.",
@@ -38,7 +38,7 @@
       "language": "hi",
       "confidence": "medium"
     },
-    "mock-copy-hash-sparse-001": {
+    "6aa4d97d71e3b47f616633eb2c96fa0c95b539fabda6b4bf00228d2461087c89": {
       "hook": null,
       "problem": null,
       "promise": null,
@@ -56,5 +56,10 @@
       "language": null,
       "confidence": null
     }
+  },
+  "source_ads": {
+    "b62dc7a3e20d0dc0661c89f14fb38797fb538876fbd2995cb56c0ba4e1a07830": "mock-ad-000101",
+    "96b6a5bb699117b86635268e195925b73f1569013957d64150285ee2b0b16eae": "mock-ad-000302",
+    "6aa4d97d71e3b47f616633eb2c96fa0c95b539fabda6b4bf00228d2461087c89": "mock-ad-000203"
   }
 }

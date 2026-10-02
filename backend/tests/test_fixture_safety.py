@@ -24,6 +24,26 @@ FIXTURE_ROOT = TESTS_ROOT / "fixtures"
 #: are access tokens. A synthetic fixture has no reason to contain one.
 LONG_NUMBER = re.compile(r"\d{9,}")
 
+#: A 64-character lowercase hex token -- i.e. a SHA-256 digest.
+#:
+#: S3.3 stores **real** `copy_hash` values in `tests/fixtures/ai/analyses.json`,
+#: because placeholder keys could never be stored and every provider lookup missed.
+#: A SHA-256 digest contains runs of nine or more digits purely by chance, which
+#: made this guard fire on a fixture that leaks nothing.
+#:
+#: So the token is masked before scanning, and **only** the token: a 64-character
+#: lowercase hex string is a digest by definition, never a decimal Meta identifier.
+#: Every other digit run in every fixture is still checked exactly as before.
+#: `test_the_digest_exemption_does_not_weaken_the_rule` proves the exemption is not
+#: a blanket pass.
+HEX64_TOKEN = re.compile(r"[0-9a-f]{64}")
+
+
+def without_digests(text: str) -> str:
+    """The text with 64-hex digest tokens replaced by a placeholder."""
+    return HEX64_TOKEN.sub("<sha256>", text)
+
+
 #: Anything that looks like a hostname. Fixtures use `example.invalid`, which
 #: RFC 2606 reserves and which can never resolve.
 HOSTLIKE = re.compile(r"https?://([^\s\"'\\]+)", re.IGNORECASE)
@@ -61,7 +81,34 @@ def test_there_are_fixtures_to_check() -> None:
 @pytest.mark.parametrize("path", FIXTURE_FILES, ids=lambda p: p.name)
 def test_no_fixture_contains_a_long_numeric_identifier(path: Path) -> None:
     text = path.read_text(encoding="utf-8")
-    assert not LONG_NUMBER.search(text), LONG_NUMBER.search(text)
+    scannable = without_digests(text)
+    assert not LONG_NUMBER.search(scannable), LONG_NUMBER.search(scannable)
+
+
+def test_the_digest_exemption_does_not_weaken_the_rule() -> None:
+    """The 64-hex exemption must mask a digest and nothing else.
+
+    Without this, `without_digests` could quietly grow into a blanket exemption and
+    the guard above would stop guarding anything. So both halves are asserted on
+    synthetic input: a leaked id is still caught, and a digest's internal digit run is
+    not.
+    """
+    leaked_id = '{"page_id": "123456789012345"}'
+    assert LONG_NUMBER.search(without_digests(leaked_id)), "a leaked id would pass"
+
+    # Synthetic rather than taken from the fixture: whether any *particular* digest
+    # happens to contain nine consecutive digits is luck, and this test is about the
+    # masking mechanism, not about one value.
+    digest = "123456789" + "a" * 55
+    assert len(digest) == 64
+    assert LONG_NUMBER.search(digest), "the test digest needs a long digit run"
+    assert not LONG_NUMBER.search(without_digests(digest)), "the digest was not masked"
+
+    # 63 characters is one short of the digest shape, so it stays subject to the rule.
+    # The boundary is exactly 64: a longer hex run has its first 64 masked and
+    # whatever follows is still scanned, which is the right outcome for a token that
+    # is not a digest in the first place.
+    assert LONG_NUMBER.search(without_digests(digest[:63])) is not None
 
 
 @pytest.mark.parametrize("path", FIXTURE_FILES, ids=lambda p: p.name)

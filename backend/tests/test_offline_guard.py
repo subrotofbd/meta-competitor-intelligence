@@ -63,13 +63,20 @@ def test_a_full_cursor_walk_works_with_sockets_blocked(
 def test_the_ai_provider_works_with_sockets_blocked(
     ai_provider: AIProvider, no_network: None
 ) -> None:
+    from tests.corpus_hashes import corpus_copy_hash
+
+    # The digest is derived from the corpus with production logic rather than pasted.
+    # The old placeholder could never be stored, so every lookup missed and this test
+    # was asserting against the provider's all-null default -- it proved the mock was
+    # reachable with no network, but not that it read anything.
     result = ai_provider.analyze_copy(
-        CopyAnalysisRequest(copy_hash="mock-copy-hash-en-001", analysis_version="mock-v1")
+        CopyAnalysisRequest(
+            copy_hash=corpus_copy_hash("mock-ad-000101"),
+            analysis_version="mock-v1",
+        )
     )
-    # S3.1 changed the return type to `AIResult(analysis, provider, model, usage)`.
-    # This test still read `.language` off the result itself, so it was failing from
-    # the moment S3.1 was pushed -- the guard it exists to provide was not running.
     assert result.analysis.language == "en"
+    assert result.analysis.hook is not None, "the stored analysis was not returned"
 
 
 def test_the_media_store_works_with_sockets_blocked(tmp_path: Path, no_network: None) -> None:

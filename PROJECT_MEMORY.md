@@ -2689,3 +2689,91 @@ the assertions.
 
 **Next step after that decision:** AI fixture re-keying, then the S3.3 frontend
 scaffold. Neither has started.
+
+---
+
+## 2026-10-02, S3.3 step 3 -- AI fixtures re-keyed to production copy hashes
+
+Closes the last obstacle noted in step 2. **No app code, no migration, no frontend.**
+
+**The defect.** `tests/fixtures/ai/analyses.json` was keyed `mock-copy-hash-en-001`
+and friends. `ad_analysis.copy_hash` carries `CHECK (copy_hash ~ '^[0-9a-f]{64}$')`, so
+those keys could never be stored. Every `MockAIProvider` lookup missed and returned
+its all-null analysis -- which meant `test_offline_guard`'s assertion that the English
+fixture yields `language == "en"` was passing against a **default**, not against stored
+data.
+
+**The fix.** All three entries re-keyed to digests computed with **production logic**:
+`providers.data.normalize.normalize_record` followed by `services.copy_hash.copy_hash_v1`,
+the same two functions the collection pipeline uses. No hash was hand-written.
+
+| Entry | Ad | Copied from |
+|---|---|---|
+| English, `high` | `mock-ad-000101` | "A kettle that actually whistles" |
+| Hindi, `medium` | `mock-ad-000302` | "Haritaki, ashwagandha, neem" |
+| all-null, sparse | `mock-ad-000203` | no title, empty body |
+
+Chosen by matching the stored interpretation's text to the corpus copy, not by
+convenience. Every analysis body is byte-identical; only the keys changed.
+
+`mock-ad-000101` appears **twice** in the corpus with different wording, so it has two
+copy digests. `_one_sighting_per_ad` keeps one sighting and the **last** wins, so
+`tests/corpus_hashes.corpus_copy_hash()` returns the last -- which is what lands in
+`ad_snapshots.copy_hash` and therefore what `GET /ads/{id}` resolves an analysis
+against. **Verified against the seeded database: for all 8 ads the stored digest
+equals the last computed one.**
+
+**New:** `backend/tests/corpus_hashes.py` derives the digests rather than storing
+them, so a corpus change cannot leave a stale constant behind. `test_ai_fixture_keys.py`
+(14 tests) re-derives them *independently* of that helper and compares -- comparing the
+helper to itself would prove nothing.
+
+**End-to-end, against the seeded database: 3 of 8 snapshots resolve a stored
+analysis** -- `en`/high for the kettle, `hi`/medium for the ayurveda ad, and the
+all-null one for the ad with no readable copy.
+
+### A safety guard was relaxed, narrowly and on purpose
+
+`test_fixture_safety.test_no_fixture_contains_a_long_numeric_identifier` forbids runs
+of nine or more digits, because that is the shape of a Meta page/ad id or an access
+token. **A SHA-256 digest contains such runs purely by chance**, and the re-keyed
+fixture tripped it while leaking nothing.
+
+`without_digests()` now masks `[0-9a-f]{64}` tokens before scanning, and **only**
+those -- a 64-character lowercase hex string is a digest by definition, never a decimal
+identifier. Every other digit run in every fixture is still checked exactly as before.
+`test_the_digest_exemption_does_not_weaken_the_rule` asserts both halves (a leaked id
+still fails; a digest's internal run does not), so the exemption cannot silently grow
+into a blanket pass.
+
+### Tests updated, not weakened
+
+`test_ai_provider.py` and `test_offline_guard.py` referenced the placeholder keys in
+eight places; they now use `EN_HASH` / `HI_HASH` / `SPARSE_HASH`, derived from the
+corpus. `test_offline_guard` gained `assert result.analysis.hook is not None`, so it
+proves stored content was returned rather than only checking a field the default also
+satisfies.
+
+`test_seed_demo.py::test_the_analysis_fixture_keys_could_never_be_stored` asserted the
+keys were **not** 64-hex. That was correct when written and is exactly the defect step 3
+fixes, so it is now `..._are_now_real_storeable_digests` and asserts the inverse.
+`scripts/seed_demo.py`'s docstring said the same thing and was corrected: the
+`--with-ai` flag is still absent, but that is now a **scope decision** rather than an
+obstacle, and adding it has not been authorised.
+
+### Gates
+
+Focused tests **166 passed** (`test_ai_fixture_keys`, `test_ai_provider`,
+`test_ai_analysis`, `test_copy_hash`, `test_offline_guard`, `test_fixture_safety`,
+`test_seed_demo`). No full suite, no xdist, no parallel runs. `ruff check` clean,
+`ruff format --check` clean, project-gate `mypy` clean (58 files), `mypy backend` **59,
+unchanged**, `alembic check` no drift, single head `0011_api_search_indexes`.
+
+**The development database was read only.** No reset, no deletion, no trigger change;
+the seeded rows are exactly as they were (`ads` 8, `ad_snapshots` 8, `collection_runs`
+3). No network request: the only provider touched is `MockProvider`, reading fixtures
+from disk. No performance data was added -- `test_no_fixture_entry_mentions_a_performance_metric`
+asserts it.
+
+**Next (not started, needs approval):** whether to add `--with-ai` to the seed now that
+the data is ready, then the S3.3 frontend scaffold.

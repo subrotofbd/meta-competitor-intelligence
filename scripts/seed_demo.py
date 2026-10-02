@@ -63,14 +63,16 @@ history, and this script never deletes or resets anything to achieve that.
 
 ## What this deliberately does not do
 
-**No `--with-ai` flag.** Invoking the AI path is safe, but it would be useless: the
-stored mock analyses in `tests/fixtures/ai/analyses.json` are keyed
-`mock-copy-hash-en-001` and friends, and `ad_analysis.copy_hash` carries
-`CHECK (copy_hash ~ '^[0-9a-f]{64}$')`. Those keys can never be stored, so
-`MockAIProvider` would miss on every real digest and return its all-null analysis.
-That writes `ad_analysis` rows which read as "analysed" and say nothing, which is
-worse than no analysis at all. Re-keying that fixture by the real computed digest is a
-separate change and is deliberately not smuggled in here.
+**No `--with-ai` flag.** This was originally an *obstacle*, not a choice: the stored
+mock analyses were keyed `mock-copy-hash-en-001` and friends, which
+`ad_analysis.copy_hash`'s `CHECK (copy_hash ~ '^[0-9a-f]{64}$')` can never accept, so
+`MockAIProvider` missed on every real digest and returned its all-null analysis --
+writing rows that read as "analysed" and say nothing.
+
+**S3.3 step 3 removed that obstacle**: `tests/fixtures/ai/analyses.json` is now keyed by
+real digests computed with production `copy_hash_v1`, and 3 of the 8 seeded ads resolve
+a stored analysis. The flag is still absent because adding it is a scope decision that
+has not been authorised, not because the data is not ready.
 
 **No invented performance data.** There is no spend, impressions, reach, clicks,
 leads, conversions, CPM, revenue or ROAS column in this schema, so none can be

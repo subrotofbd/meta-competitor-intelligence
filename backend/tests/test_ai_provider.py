@@ -19,6 +19,7 @@ from app.providers.ai.models import (
     CopyAnalysis,
     CopyAnalysisRequest,
 )
+from tests.corpus_hashes import corpus_copy_hash
 
 #: The fourteen agreed analysis fields, plus the two that describe the analysis.
 EXPECTED_FIELDS = {
@@ -43,6 +44,17 @@ EXPECTED_FIELDS = {
 #: Words that would turn an interpretation into a performance claim. Spend,
 #: leads, sales, ROAS, conversions and reach are not public for commercial ads.
 PERFORMANCE_CLAIM = "roas"
+
+#: The three fixture digests, derived rather than pasted.
+#:
+#: These were `mock-copy-hash-en-001` and friends. Those could never be stored --
+#: `ad_analysis.copy_hash` requires 64 lowercase hex -- so every lookup missed, the
+#: mock returned its all-null analysis, and the assertions below were passing
+#: against a default rather than against stored data. Each ad is named by the copy
+#: the stored interpretation actually describes.
+EN_HASH = corpus_copy_hash("mock-ad-000101")  # "A kettle that actually whistles"
+HI_HASH = corpus_copy_hash("mock-ad-000302")  # "Haritaki, ashwagandha, neem"
+SPARSE_HASH = corpus_copy_hash("mock-ad-000203")  # no title, empty body
 
 
 def _request(copy_hash: str, **overrides: str) -> CopyAnalysisRequest:
@@ -107,12 +119,12 @@ def test_a_request_must_carry_its_copy_hash_and_version() -> None:
     with pytest.raises(ValidationError):
         CopyAnalysisRequest(analysis_version="mock-v1")  # type: ignore[call-arg]
     with pytest.raises(ValidationError):
-        CopyAnalysisRequest(copy_hash="mock-copy-hash-en-001")  # type: ignore[call-arg]
+        CopyAnalysisRequest(copy_hash=EN_HASH)  # type: ignore[call-arg]
 
 
 def test_a_request_keeps_the_copy_slots_separate() -> None:
     """A headline and body reading alike are two different signals."""
-    request = _request("mock-copy-hash-en-001", headline="A kettle that whistles")
+    request = _request(EN_HASH, headline="A kettle that whistles")
     assert request.primary_text is not None
     assert request.headline == "A kettle that whistles"
 
@@ -134,7 +146,7 @@ def test_a_class_without_analyze_copy_does_not_satisfy_the_protocol() -> None:
 
 
 def test_english_copy_is_analysed(ai_provider: AIProvider) -> None:
-    analysis = ai_provider.analyze_copy(_request("mock-copy-hash-en-001")).analysis
+    analysis = ai_provider.analyze_copy(_request(EN_HASH)).analysis
     assert analysis.language == "en"
     assert analysis.confidence is Confidence.high
     assert analysis.hook is not None
@@ -143,7 +155,7 @@ def test_english_copy_is_analysed(ai_provider: AIProvider) -> None:
 
 def test_hindi_copy_is_analysed_and_recorded_in_its_own_language(ai_provider: AIProvider) -> None:
     """Interpreted in Hindi, summarised in English, and labelled `hi`."""
-    request = _request("mock-copy-hash-hi-001", language_hint="hi")
+    request = _request(HI_HASH, language_hint="hi")
     analysis = ai_provider.analyze_copy(request).analysis
     assert analysis.language == "hi"
     assert analysis.hook is not None
@@ -152,14 +164,14 @@ def test_hindi_copy_is_analysed_and_recorded_in_its_own_language(ai_provider: AI
 
 def test_an_unsupported_field_stays_null(ai_provider: AIProvider) -> None:
     """The English fixture has no urgency claim, and none is written for it."""
-    analysis = ai_provider.analyze_copy(_request("mock-copy-hash-en-001")).analysis
+    analysis = ai_provider.analyze_copy(_request(EN_HASH)).analysis
     assert analysis.urgency is None
     assert analysis.offer is not None
 
 
 def test_a_sparse_source_produces_a_fully_empty_analysis(ai_provider: AIProvider) -> None:
     """Copy with nothing in it yields fourteen nulls, not fourteen sentences."""
-    analysis = ai_provider.analyze_copy(_request("mock-copy-hash-sparse-001")).analysis
+    analysis = ai_provider.analyze_copy(_request(SPARSE_HASH)).analysis
     assert analysis == CopyAnalysis()
 
 
@@ -171,7 +183,7 @@ def test_unknown_copy_yields_an_empty_analysis_rather_than_a_guess() -> None:
 
 
 def test_the_mock_never_claims_performance(ai_provider: AIProvider) -> None:
-    for copy_hash in ("mock-copy-hash-en-001", "mock-copy-hash-hi-001"):
+    for copy_hash in (EN_HASH, HI_HASH):
         analysis = ai_provider.analyze_copy(_request(copy_hash)).analysis
         for field in EXPECTED_FIELDS:
             value = getattr(analysis, field)
@@ -188,14 +200,14 @@ def test_interpretation_is_framed_as_possibility(ai_provider: AIProvider) -> Non
     """
     assert "why_it_may_work" in CopyAnalysis.model_fields
     hedge = ("may", "might", "could", "whether", "it is a reading")
-    for copy_hash in ("mock-copy-hash-en-001", "mock-copy-hash-hi-001"):
+    for copy_hash in (EN_HASH, HI_HASH):
         text = ai_provider.analyze_copy(_request(copy_hash)).analysis.why_it_may_work
         assert text is not None
         assert any(word in text.lower() for word in hedge), text
 
 
 def test_analysis_is_deterministic(ai_provider: AIProvider) -> None:
-    request = _request("mock-copy-hash-en-001")
+    request = _request(EN_HASH)
     assert ai_provider.analyze_copy(request) == ai_provider.analyze_copy(request)
 
 
