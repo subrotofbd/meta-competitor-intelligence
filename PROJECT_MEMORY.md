@@ -3619,3 +3619,127 @@ URL, nothing sent anywhere.
 
 **Next (not started, needs approval):** the end-of-S3.3 document reconciliation, deferred
 since the step-6 checkpoint, and the S3.3 STOP checkpoint itself.
+
+
+---
+
+## 2026-10-02, Checkpoint S3.3 FINAL -- API read surface, Ad Library frontend, doc reconciliation
+
+The deferred documentation reconciliation is done and S3.3 is closed. **No application,
+API, schema, database or migration change in this checkpoint** -- it is documentation only.
+
+### What S3.3 delivered
+
+Backend read API, collection pipeline, append-only history, and the whole Ad Library
+frontend.
+
+| Capability | Commit |
+|---|---|
+| `GET /competitors` | `438f4af` |
+| Demo seed path (`scripts/seed_demo.py`) | `1b71445` |
+| AI fixtures re-keyed to real production digests | `7d02882` |
+| Frontend foundation (React/Vite/TS/Tailwind, dev proxy) | `e61dfea` |
+| `interpretation` widened to `Record<string, unknown>` | `cf89136` |
+| Provenance UI primitives | `22e6c41` |
+| Ads Library grid | `62de95a` |
+| `copy_fields` on `AdListItemOut` | `b7fc1a4` |
+| Locked product UI/UX direction | `a5a78b4`, `de28b0e` |
+| Filters, search, sort, pagination | `a108aec` |
+| Ad Detail | `48df868` |
+| Historical snapshots | `61d89a7` |
+| CSV export | `39016a6` |
+
+**Shipped routes, five:** `GET /ads`, `GET /ads/{id}`, `GET /ads/{id}/snapshots`,
+`GET /competitors`, `GET /exports/ads.csv`.
+
+### Frontend stack
+
+React 19, Vite 7, TypeScript, Tailwind 4 (`@tailwindcss/vite`), Vitest 4 + jsdom. No global
+state library, no component library, no router library, no data-fetching library. Two
+routes hand-rolled from `window.location.pathname`: `/` and `/ads/{id}`. The dev proxy is
+the only path from the browser to the API, which is why the backend has no CORS.
+
+### Provenance and UI rules
+
+A missing value is `null` and renders `—`, never `0` or `N/A`; a genuine `0` renders `0`.
+`data_origin` is uniformly neutral because it answers *how obtained*; `evidence_class` is
+the only axis that carries colour, and `AI_INTERPRETATION` has a hue used nowhere else.
+Status is per context, never flattened. Longevity is a proxy labelled **LONG-RUNNING SIGNAL**
+with the exact tooltip "duration is a public proxy, not performance" -- never a winner,
+loser, best or top performer.
+
+### Seeded demo state, and why it is still there
+
+The development database **intentionally** contains demo rows: 1 competitor, 3 Pages, 8 ads,
+8 append-only snapshots, 8 media *references*, 3 collection runs. **No database reset was
+ever performed**, and none should be without explicit consent.
+
+`ad_snapshots` is append-only and refuses `UPDATE` and `DELETE`; `ads` is FK-blocked. So the
+seeded rows are permanent, and 18 pre-existing tests in `test_api_ads.py` that assume an
+empty corpus fail while they are present. That set is recorded and unchanged by later work:
+step 6A confirmed the failure list is byte-identical before and after its change. New tests
+in this project are written **not** to assume an empty corpus.
+
+### No real provider, and no real data
+
+`MockProvider` is the only data provider and reads a sanitised fixture corpus from disk.
+**No network request to Meta has ever been made.** A real provider for India commercial ads
+-- plus whatever access it requires, given that Meta's official Ad Library API does not
+serve Indian commercial ads -- is a separate future problem, not a switch. `MockAIProvider`
+is the only AI provider; there is no AI SDK installed and no trigger endpoint.
+
+### Nothing fabricated
+
+No spend, ROAS, CPA, CPC, CPM, leads, sales, revenue, clicks, reach, impressions or
+conversions are computed, stored, displayed or implied anywhere -- including visually, by
+chart or dashboard shape. They are not public for commercial ads.
+
+### Remaining limitations, in order of importance
+
+1. **No authentication at all.** No auth routes, no user table, no JWT, no roles, no audit
+   log. Every route is unauthenticated, so anything that can reach the port reads every
+   stored ad. This must change before the app is exposed to anyone else.
+2. **No competitor management.** `GET /competitors` reads only. Competitors and Pages are
+   created by the operator directly, or by the seed script. No write route, no UI.
+3. **No Runs surface.** No `/collections` routes, no start-run control, no run list or run
+   detail page. Collection runs appear only as `collection_run_id` on a snapshot.
+4. **No `/healthz`.**
+5. **No media bytes, ever.** References only; `bytes_available` is always `false`.
+6. **No real-data acceptance run.** The S4 real-data gate is unstarted, so no acceptance
+   item has been verified against live Meta data.
+7. **Reports and PDF generation are not part of S3.3** and remain future scope, as does
+   authentication.
+8. No deployment path: `docker-compose.yml` defines PostgreSQL only, and there is no
+   one-command application deployment.
+9. Deferred `/ads` filters by design: `platform`, `display_format`, `media_type`,
+   `funnel_stage`, duration buckets, `language`, `confidence`, `has_analysis`.
+
+### Document reconciliation performed in this checkpoint
+
+- **`IMPLEMENTATION_PLAN.md`** -- added an "S7 -> S3.3 naming" section mapping each planned
+  S7 item to what shipped, with commits, and stating plainly that **Add competitor** and
+  **Runs** are still outstanding. The original S0-S8 rows are untouched.
+- **`ARCHITECTURE.md`** -- corrected four claims that were plans rather than facts: Docker
+  Compose does **not** define backend/worker/frontend (PostgreSQL only); the `docs/`,
+  `docker/` and `storage/` directories do not exist; **there is no authentication** (the
+  old Security section described Argon2, JWT, role checks and an audit log, none of which
+  exist); and `scripts/smoke_real.py` **does not exist**. Added a Frontend section and
+  documented the `copy_fields` addition and its zero-query proof.
+- **`README.md`** -- removed "No database, no providers, no AI, no frontend yet" and the S0.1
+  status; replaced the quick-start with commands that actually run today.
+- **`SETUP_WINDOWS.md`** -- rewrote §9 from "S0.1 state" into verified current
+  instructions (database, migrations, optional seed, API, worker, frontend, and the frontend
+  URL), fixed §11's "suite is empty" note, and corrected the troubleshooting command from
+  `docker compose up -d db` to `postgres`.
+- **`AGENTS.md`** -- **not modified.** The UI/UX pointer added at `de28b0e` is verified
+  present in section 12, and no further rule was needed.
+
+### Verification
+
+`git diff --check` clean. Documentation only; no backend suite run, no server started. The
+two runnable commands added to `SETUP_WINDOWS.md` were verified without starting anything:
+`uv run alembic heads` reports `0011_api_search_indexes`, and `uv run python
+scripts/check_db.py` reports the database reachable on PostgreSQL 16.15.
+
+**S3.3 is complete. Stopping here for human review.** The next work is not a slice: it is
+authentication, then a real provider and the S4 real-data acceptance run.

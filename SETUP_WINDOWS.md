@@ -192,21 +192,25 @@ Then restart Docker Desktop.
 
 ## 7. PostgreSQL — primary path vs fallback
 
-### Primary: Docker Compose (S0.2)
+### Primary: Docker Compose
 
-PostgreSQL 16 runs as a container. The `docker-compose.yml` is created in
-**S0.2** — it does not exist yet. When it does:
+PostgreSQL 16 runs as a container. `docker-compose.yml` **exists** and defines a single
+service named `postgres` — not `db`. The compose file does **not** define the backend, the
+worker or the frontend; those run from the host (see §9).
 
 ```powershell
-docker compose up -d db
-docker compose ps
-docker compose logs -f db
+docker compose up -d postgres
+docker compose ps            # wait for "healthy"
+docker compose logs -f postgres
 ```
+
+The service has a `pg_isready` healthcheck, so `docker compose ps` reporting `healthy` is the
+signal that migrations can run.
 
 Stop (keeps data):
 
 ```powershell
-docker compose stop db
+docker compose stop postgres
 ```
 
 Destroy the container and its volume (**destructive — see the data-loss rule in
@@ -216,6 +220,10 @@ Destroy the container and its volume (**destructive — see the data-loss rule i
 # DESTRUCTIVE. Requires explicit human consent before running.
 # docker compose down -v
 ```
+
+> `docker compose down -v` deletes the volume, and therefore **every seeded demo row and
+> every snapshot**. `ad_snapshots` refuses `UPDATE` and `DELETE`, so those rows cannot be
+> re-created by re-seeding alone — they would be gone. Never run it to tidy up.
 
 ### Fallback: native PostgreSQL 16
 
@@ -264,21 +272,65 @@ The virtualenv lives at `.venv\Scripts\`, **not** `.venv/bin/`.
 
 ---
 
-## 9. Running things (S0.1 state)
+## 9. Running things (current state, verified)
 
-S0.1 created the skeleton only. There is no database, no migration, and no
-frontend yet, so most run commands begin in a later checkpoint.
+Everything below actually runs today. There is no one-command deployment: `docker-compose.yml`
+defines **PostgreSQL only**, and the backend, worker and frontend each start from the host.
+
+### 9.1 Database and schema
 
 ```powershell
-# Worker entrypoint -- exists, but is an intentional no-op in S0.1
-uv run python -m worker
-
-# ASGI app object -- exists, but registers NO routes in S0.1
-uv run uvicorn app.main:app --reload --port 8000
+docker compose up -d postgres     # the only compose service
+docker compose ps                 # wait for healthy
+uv run alembic upgrade head       # 0011_api_search_indexes is head
+uv run python scripts/check_db.py # confirms reachable AND migrated
 ```
 
-Full startup sequence (compose + migrate + API + worker) is documented in
-**S0.2**.
+### 9.2 Optional demo data
+
+```powershell
+uv run python scripts/seed_demo.py
+```
+
+Drives one real collection through the real pipeline against `MockProvider`: 1 competitor,
+3 pages, 8 ads, 8 append-only snapshots, 8 media **references**, and 3 collection runs.
+
+**It writes permanent rows.** `ad_snapshots` is append-only and refuses `UPDATE` and
+`DELETE` (there are triggers), and `ads` is foreign-key blocked, so seeded rows cannot be
+cleaned up afterwards. Several API tests assume an empty corpus and will fail while demo
+rows are present. That is a known, recorded condition, not a broken setup.
+
+### 9.3 API and worker
+
+```powershell
+uv run uvicorn app.main:app --reload --port 8000    # API, http://localhost:8000
+uv run python -m worker                             # separate window
+```
+
+Five routes are served: `/ads`, `/ads/{id}`, `/ads/{id}/snapshots`, `/competitors`,
+`/exports/ads.csv`. There is **no** `/healthz` and **no** authentication of any kind, so
+anything that can reach port 8000 can read every stored ad. Keep it bound to localhost.
+
+The worker claims jobs from the PostgreSQL queue and runs collection. With only
+`MockProvider` available it will do nothing until `seed_demo.py` has enqueued work.
+
+### 9.4 Frontend
+
+```powershell
+Set-Location frontend
+npm install
+npm run dev
+```
+
+Open **http://localhost:5173**. Vite proxies `/api` to the backend on port 8000 and strips
+the prefix, so the browser only ever makes same-origin calls -- which is why the backend
+needs no CORS configuration. Other scripts: `npm run build` (typecheck + production build),
+`npm run preview`, `npm test`.
+
+### 9.5 What is not available
+
+No `/healthz`. No authentication. No media bytes are ever served, because none are
+acquired. No real Meta provider, so nothing here reaches facebook.com.
 
 ---
 
@@ -296,7 +348,7 @@ placeholders only and documents every supported variable.
 ## 11. Tests
 
 ```powershell
-# All tests (the suite is empty in S0.1; first tests arrive in S1.1)
+# Backend suite. Needs the Docker daemon, because the DB tests use testcontainers.
 uv run pytest
 
 # By marker
@@ -339,5 +391,5 @@ git check-attr text eol -- pyproject.toml   # expect: text: auto, eol: lf
 | `'Meta' is not recognised` | Unquoted path with a space | Always quote: `"C:\Users\DELL\Downloads\Meta Audit"` |
 | `ModuleNotFoundError: No module named 'app'` | Wrong directory or env not synced | Run from repo root, then `uv sync` |
 | `.venv\bin\python` not found | POSIX habit | Windows path is `.venv\Scripts\python.exe` |
-| Connection refused on port 5432 | DB container not running | `docker compose up -d db` (from S0.2) |
+| Connection refused on port 5432 | DB container not running | `docker compose up -d postgres` |
 | `could not translate host name` in compose | Unquoted bind mount path | Quote every bind-mount path |

@@ -14,10 +14,30 @@ run, run AI copy analysis, and browse it in an Ad Library UI.
 
 ## Status
 
-**Checkpoint S0.1 — repository and governance foundation. Complete.**
+**Checkpoint S3.3 complete.** The backend read API, the collection pipeline, the
+append-only snapshot history, and the Ad Library frontend are built and tested.
 
-No database, no providers, no AI, no frontend yet. Nothing in this repository
-collects data from Meta.
+**Shipped today**
+
+| | |
+|---|---|
+| Routes | `GET /ads`, `GET /ads/{id}`, `GET /ads/{id}/snapshots`, `GET /competitors`, `GET /exports/ads.csv` |
+| Frontend | Ad Library with filters, search, sort and pagination; Ad Detail; historical snapshots; CSV export |
+| Database | PostgreSQL 16 via Docker Compose, Alembic migrations applied |
+| Worker | Separate process; claims jobs and executes collection |
+| Data | `MockProvider` against a sanitised fixture corpus |
+
+**Deliberately not built.** No authentication of any kind — no login, no JWT, no roles, no
+audit log; the app is single-operator. No `/healthz`. No platform, display-format or media
+filter. No media **bytes**: creative assets are references only and nothing is ever fetched,
+proxied or thumbnailed. No AI generation and no AI vendor — `MockAIProvider` reads stored
+interpretations, and there is no trigger endpoint. No spend, ROAS, leads, revenue, reach or
+impression figures anywhere, because those are not public for commercial ads. No PDF or
+report generation; CSV export only. No dashboard charts.
+
+**No real Meta provider exists and nothing here collects from Meta.** The only data
+provider is `MockProvider`. A real provider for India commercial ads — plus whatever access
+that requires — is a separate, later problem, not a configuration flag.
 
 Current state and the next checkpoint: [`PROJECT_MEMORY.md`](PROJECT_MEMORY.md)
 
@@ -40,8 +60,8 @@ Current state and the next checkpoint: [`PROJECT_MEMORY.md`](PROJECT_MEMORY.md)
 ## Stack
 
 Backend Python 3.12 / FastAPI / SQLAlchemy 2 / Alembic · Database PostgreSQL 16 ·
-Frontend React / Vite / TypeScript / Tailwind (S3) · Worker separate process ·
-Dependencies managed with [`uv`](https://docs.astral.sh/uv/)
+Frontend React 19 / Vite 7 / TypeScript / Tailwind 4 · Worker separate process ·
+Python dependencies via [`uv`](https://docs.astral.sh/uv), frontend via npm
 
 ---
 
@@ -49,16 +69,26 @@ Dependencies managed with [`uv`](https://docs.astral.sh/uv/)
 
 ```powershell
 Set-Location "C:\Users\DELL\Downloads\Meta Audit"
-Copy-Item .env.example .env
-```
+Copy-Item .env.example .env     # then set POSTGRES_PASSWORD
 
-Python dependencies require `uv` (see [`SETUP_WINDOWS.md`](SETUP_WINDOWS.md) §3).
-Full setup, Docker verification and troubleshooting are documented there.
+docker compose up -d postgres   # compose defines PostgreSQL only
+uv sync                         # creates .venv from pyproject.toml + uv.lock
+uv run alembic upgrade head     # create the schema
+uv run python scripts/seed_demo.py   # optional: demo rows from the fixture corpus
+
+uv run uvicorn app.main:app --reload --port 8000   # API
+uv run python -m worker                            # worker, separate window
+```
 
 ```powershell
-uv run python -m worker        # worker entrypoint (no-op in S0.1)
-uv run pytest                  # test suite (empty in S0.1)
+Set-Location frontend
+npm install
+npm run dev      # http://localhost:5173 -- proxies /api to the backend on :8000
 ```
+
+The frontend reaches the API **only** through that dev proxy, which is also why the backend
+needs no CORS configuration. There is no one-command production deployment; see
+[`SETUP_WINDOWS.md`](SETUP_WINDOWS.md) §9 for what actually runs today.
 
 ---
 
@@ -70,6 +100,7 @@ impersonation, no `lsd` token mining, no reverse-engineered internal GraphQL, no
 private endpoints, no rate-limit circumvention. A blocked provider **stops and
 reports**; it is never worked around.
 
-Ad data is collected through a replaceable `AdDataProvider` interface.
-`MockProvider` is the first implementation and the first slice runs entirely on
-mock data with no external network access.
+Ad data is collected through a replaceable `AdDataProvider` interface. `MockProvider`
+is the only implementation that exists, and it reads a sanitised fixture corpus from disk,
+so every slice so far has run with **no external network access**. A blocked provider stops
+and reports; it is never worked around.

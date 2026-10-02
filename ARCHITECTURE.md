@@ -18,15 +18,25 @@ scope and only leaves seams. See IMPLEMENTATION_PLAN.md.
   SDK is installed (`AGENTS.md` section 12), so a real adapter is a later phase. Model names come
   from settings, never hard-coded, and `build_ai_provider` refuses a provider it cannot build rather
   than silently substituting the mock.
-- Deployment: Docker Compose (postgres, minio optional, backend, worker, frontend). Windows via Docker Desktop/WSL2.
+- Deployment: Docker Compose defines **PostgreSQL only** (`docker-compose.yml` has a single
+  `postgres` service). The backend, the worker and the frontend each run from the host —
+  backend and worker through `uv`, frontend through `npm`. Windows via Docker Desktop/WSL2.
+  There is **no** compose or one-command deployment of the application itself.
 
 ## Layout
 ```
-frontend/  backend/app/{api,core,db,models,schemas,services}  worker/  database/migrations
-scripts/   docs/   docker/   storage/   tests/
+frontend/            # React + Vite + TypeScript + Tailwind (see "Frontend" below)
+backend/app/{api,core,db,models,schemas,services}
+backend/tests/       # unit, contract and integration tests + sanitised fixtures
+worker/              # python -m worker
+database/migrations/ # Alembic
+scripts/             # check_db.py, seed_demo.py
 backend/app/providers/data/{base.py, official_api.py, public_ui.py, apify.py, manual_import.py}
 backend/app/providers/ai/{base.py, models.py, errors.py, mock.py}   # no real provider yet
 ```
+
+There is no `docs/`, `docker/` or `storage/` directory; an earlier revision of this list
+included them and they were never created.
 
 ## Provider abstraction
 ```python
@@ -240,13 +250,22 @@ translations to trust. English summaries, if ever wanted, arrive as a **new `ana
 schema** -- never as columns bolted onto v1.
 
 ## API surface (slice 1)
-Planned for the whole slice: `/auth/*`, `/competitors/{id}/pages`, `/collections` (start run, list runs,
-run detail), `/ads/{id}/media/{asset_id}`, `/ads/{id}/analyze`, `/healthz`.
+Those five are **all** that exist. Planned for the whole slice and **not built**:
+`/auth/*`, `/collections` (start run, list runs, run detail), `/ads/{id}/media/{asset_id}`,
+`/ads/{id}/analyze`, `/healthz`. There is no competitor-management write route either:
+competitors and Pages are currently created by the operator directly in the database or by
+`scripts/seed_demo.py`, and `GET /competitors` only reads them.
 
-**Shipped so far:** `GET /ads`, `GET /ads/{id}`, `GET /ads/{id}/snapshots`, `GET /exports/ads.csv` (S3.2), and
-`GET /competitors` (S3.3 step 1). Nothing else exists yet. In particular `/ads/{id}/analyze` is deliberately
+**Shipped:** `GET /ads`, `GET /ads/{id}`, `GET /ads/{id}/snapshots`, `GET /exports/ads.csv` (S3.2), and
+`GET /competitors` (S3.3). Nothing else exists. In particular `/ads/{id}/analyze` is deliberately
 **absent** -- analysis is triggered by the collection pipeline, never by a page view -- and
 `/ads/{id}/media/{asset_id}` cannot exist until a byte-acquisition phase approves storing and serving media bytes.
+
+`AdListItemOut` gained `copy_fields` at S3.3 step 6A so a grid can show what an ad says
+without a request per row. It is read out of the latest snapshot `ad_query` had **already
+batch-loaded** for the page, so it costs no extra query: at `/ads` page sizes 1, 5, 25 and
+100 the statement count is the same four every time, before and after the change. `null` means the ad has no snapshot yet, which
+is a different statement from a snapshot whose fields are all null.
 
 **`GET /competitors`** returns every competitor with its Facebook Pages nested:
 
@@ -309,11 +328,94 @@ require buffering the whole file to close.
 
 No `raw_ref`, queue id, prompt, raw model response or `storage_key` appears in any response, in JSON or in CSV.
 
+## Frontend (added in S3.3)
+
+React 19 + Vite 7 + TypeScript + Tailwind 4, in `frontend/`. It is a **pure API client**:
+no global state library, no component library, no router library, and no data-fetching
+library. `fetch` and the platform are the whole stack.
+
+**Two routes, hand-rolled.** `resolveRoute` reads `window.location.pathname`: `/` is the
+Ads Library, `/ads/{id}` is the Ad Detail. A malformed id resolves to a distinct state that
+renders "not found" **without issuing a request**, because a typo should not cost a
+round trip and a 422. Routes are real `href`s, so an ad's URL is copyable and shareable,
+which matters for a research tool.
+
+**The dev proxy is the only way the frontend reaches the API.** `vite.config.ts` proxies
+`/api` to `http://localhost:8000` and strips the prefix, because the backend mounts its
+routers at the root. The client therefore only ever makes same-origin requests, which is
+why the backend has **no CORS middleware**. A hardcoded origin in client code would bypass
+the proxy, break in production, and turn every call cross-origin.
+
+**Research state lives in the URL and nowhere else.** Filters, `q`, sort, direction, page
+and page size are serialised to and from the query string, so a filtered view is
+reproducible and survives a refresh. Values arriving from a URL are validated against an
+allowlist and fall back to the default rather than being forwarded, because the backend
+answers a bad sort with a 400.
+
+**One serialiser, used by the list and by the export.** `adsQueryToFilterParams` defines
+what "filtered" means; `adsQueryToParams` is built on top of it and adds paging and
+sorting. The CSV export sends the filter set only. Two builders would be two things to keep
+in step, and the failure mode would be an export that quietly drops a filter and still
+produces a plausible-looking file of the wrong rows.
+
+**Provenance is visible but restrained, and it is decided in the UI.** A missing value is
+`null` and renders as an em dash, never `0` or `"N/A"` -- with the exception that matters:
+a genuine `0` renders as `0`, because an ad first observed today really has run for zero
+days. `data_origin` gets one neutral tone across all four values, because it answers *how
+a value was obtained*, while `evidence_class` answers *how much we stand behind it* and is
+the only axis that carries colour. `AI_INTERPRETATION` is given a hue used nowhere else so
+model output cannot be read as something the provider said. Status is per context and never
+flattened to the ad. Longevity is a proxy, labelled **LONG-RUNNING SIGNAL** with the
+tooltip "duration is a public proxy, not performance", and never a winner or a ranking.
+
+**AI is read-only here too.** The Ad Detail screen displays a stored analysis when one
+exists and says "not analysed" when it does not -- never fourteen empty fields, which would
+read as "we analysed it and found nothing". `interpretation` is an open
+`Record<string, unknown>`, so values that are not strings render as themselves, and a
+future `analysis_version` can add fields without the client dropping them.
+
+**Media is never fetched.** No `<img>`, `<video>`, `<iframe>`, proxy, thumbnail or download
+anywhere. `source_url` is rendered as text plus a `data-` attribute, and
+`bytes_available` is `false`, so the UI says **bytes not acquired**. `duration_seconds` is
+displayed exactly as sent, because it is a serialised `Decimal` and parsing it for
+computation would reintroduce the float error the string exists to avoid.
+
+**CSV export** reads the current filter state and streams the response to a download after
+checking the status, so a 400, a 413 (over `MAX_EXPORT_ROWS`) or a 500 is reported instead of
+downloading a JSON error body as `ads.csv`.
+
+The locked product UI/UX direction, binding on every screen, is recorded in
+`PROJECT_MEMORY.md` and referenced from `AGENTS.md` §12.
+
+---
+
 ## Security
-Secrets only in env (`.env.example`, `.env` gitignored). Argon2 password hashing, short-lived JWT + refresh, role checks
-on every route, audit log for logins, competitor changes, runs, exports, analysis. Provider tokens never sent to the browser.
+
+**There is no authentication.** Not deferred-by-omission — built and then removed. There
+are no auth routes, no user table, no password hashing, no JWT, no refresh tokens, no role
+checks and no audit log. `backend/app/api/` contains exactly `ads.py`, `competitors.py` and
+`errors.py`. This is a deliberate, recorded position for a single-operator tool on a local
+machine, and it is the single most important thing to change before this is exposed to
+anyone else: **every route is currently unauthenticated**, so anyone who can reach the port
+can read every stored ad.
+
+Authentication and roles are future scope, in that order of importance.
+
+What *is* enforced today: secrets live in the environment only (`.env` gitignored,
+`.env.example` placeholders only); no provider credential or internal identifier reaches any
+response; `ApiError.detail` is never rendered by the client, so a stack trace or driver
+message cannot leak through the UI; and a provider that is blocked stops the run and reports
+rather than being worked around.
 
 ## Testing
 Unit: normalizer, hashing, status transitions, bucket logic, URL canonicalization. Contract tests per provider using
-sanitized recorded payloads (`tests/fixtures/`). Integration: Postgres via testcontainers. A `scripts/smoke_real.py`
-drives one real collection and writes a report for the checkpoint.
+sanitized recorded payloads (`backend/tests/fixtures/`). Integration and API tests run against
+PostgreSQL through `testcontainers[postgres]`, which **is** a dev dependency.
+
+`scripts/` contains `check_db.py` (confirms the database is reachable and migrated) and
+`seed_demo.py` (drives one collection through the real pipeline against the mock provider).
+**`scripts/smoke_real.py` does not exist** — an earlier revision of this section claimed it
+did. A real-data smoke run is still owed and is the gate for the S4 provider work.
+
+Frontend: Vitest for the provenance primitives, the Ads Library, Ad Detail, the snapshot
+history and CSV export, plus `npm run build` as the type-and-bundle check.
