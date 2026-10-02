@@ -16,7 +16,7 @@
 
 import { request } from "./client";
 import { truncateIdentifier } from "../components/provenance/format";
-import type { AdListOut, CompetitorListOut } from "../types/api";
+import type { AdDetailOut, AdListOut, CompetitorListOut } from "../types/api";
 
 // The default and maximum page sizes live in `components/library/adsQuery.ts` as
 // `DEFAULT_PAGE_SIZE` and `MAX_PAGE_SIZE`. A second copy of "25" here would be two
@@ -42,6 +42,18 @@ export function fetchAds(
 ) {
   return request<AdListOut>("/ads", {
     query,
+    ...(options.signal ? { signal: options.signal } : {}),
+  });
+}
+
+/**
+ * One ad in full: identity, copy, contexts, media and any stored analysis.
+ *
+ * The only request the Ad Detail screen makes. No list, no directory, no media URL -- the
+ * media references come back as references and are never fetched.
+ */
+export function fetchAd(adId: string, options: FetchOptions = {}) {
+  return request<AdDetailOut>(`/ads/${encodeURIComponent(adId)}`, {
     ...(options.signal ? { signal: options.signal } : {}),
   });
 }

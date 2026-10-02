@@ -46,6 +46,7 @@ import { NullValue } from "../provenance/NullValue";
 import { SafeText } from "../provenance/SafeText";
 import { formatUtcDateTime } from "../provenance/format";
 import { compactUuid, lookupPage, type Directory } from "../../api/library";
+import { adPath, routeLinkProps } from "../../router";
 import type { AdListItemOut, AdListOut, ContextOut } from "../../types/api";
 
 /** Shown when `platforms` is `[]`. Never a guess at what the ad ran on. */
@@ -126,7 +127,7 @@ function AdRow({ ad, directory }: { ad: AdListItemOut; directory: Directory }) {
       {/* 3. Platforms -- provider order, never sorted, never inferred */}
       <div role="cell" className={`${CELL} max-md:block md:hidden lg:block`}>
         <CellLabel>Platforms</CellLabel>
-        <Platforms ad={ad} />
+        <PlatformList platforms={ad.platforms} />
       </div>
 
       {/* 4. Copy -- what the ad actually says */}
@@ -303,17 +304,22 @@ function Names({ ad, directory }: { ad: AdListItemOut; directory: Directory }) {
         which in a competitor-research grid is not a cosmetic problem. Compact, because
         it is an identifier rather than content; the full value is on hover.
       */}
-      <span className="ref text-slate-400 dark:text-slate-500" title={ad.meta_ad_id}>
+      <a
+        {...routeLinkProps(adPath(ad.id))}
+        title={ad.meta_ad_id}
+        aria-label={`Open the full record for ad ${ad.meta_ad_id}`}
+        className="ref w-fit text-slate-500 underline decoration-slate-300 underline-offset-2 hover:text-slate-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-600 dark:text-slate-400 dark:decoration-slate-600 dark:hover:text-slate-100 dark:focus-visible:outline-sky-400"
+      >
         <SafeText value={ad.meta_ad_id} />
-      </span>
+      </a>
     </div>
   );
 }
 
-function Platforms({ ad }: { ad: AdListItemOut }) {
+export function PlatformList({ platforms }: { platforms: readonly string[] }) {
   // `[]` means the stored record lists no platforms. That is not "this ad ran nowhere",
   // and it is not an invitation to guess Facebook. It gets its own words.
-  if (ad.platforms.length === 0) {
+  if (platforms.length === 0) {
     return (
       <span data-testid="no-platforms" className="text-slate-500 dark:text-slate-400">
         {NO_PLATFORMS_RECORDED}
@@ -323,7 +329,7 @@ function Platforms({ ad }: { ad: AdListItemOut }) {
 
   return (
     <span data-testid="platform-list" className="flex flex-wrap gap-1">
-      {ad.platforms.map((platform, index) => (
+      {platforms.map((platform, index) => (
         // Keyed on index because the provider order is the information here, and a
         // repeated platform would collide on value alone. Order is preserved exactly as
         // sent: not sorted, not deduplicated, not completed with a guess.

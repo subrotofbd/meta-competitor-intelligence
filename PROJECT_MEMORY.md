@@ -3332,3 +3332,115 @@ happen.
 
 143 frontend tests pass across 4 files. `tsc --noEmit` clean, build clean, 41 modules. No
 backend suite run, because no backend file changed.
+
+---
+
+## 2026-10-02, S3.3 step 8 -- ad detail screen
+
+**Frontend only.** No backend, database, seed, migration or AI-fixture change.
+
+### Files
+
+| File | Change |
+|---|---|
+| `src/router.ts` | **New.** Route resolution, `navigate`, `useRoute`, `routeLinkProps` |
+| `src/components/library/AdDetail.tsx` | **New.** The screen |
+| `src/components/library/AdDetail.test.tsx` | **New.** 37 tests |
+| `src/App.tsx` | Renders the route |
+| `src/api/library.ts` | `fetchAd` |
+| `src/components/library/AdsGrid.tsx` | `PlatformList` extracted and exported; the ad id is now the row's link |
+
+### Routing: two screens, no library
+
+`resolveRoute` reads `window.location.pathname`: `/` is the library, `/ads/{id}` is the
+record. `react-router` would add a dependency, a provider tree and its own ownership of
+history, to answer a two-case question -- and step 7 already owns URL state for the
+library, so a second history owner would have to be reconciled with it.
+
+Every route is a genuine `href`, so an ad's URL can be copied, shared, middle-clicked or
+opened in a new tab. That matters more here than usual: reproducible research is the
+product. JavaScript intercepts only the plain left click.
+
+**A malformed id resolves to a distinct `malformed` route and is never fetched.**
+`/ads/not-a-uuid` would be a 422 and a wasted round trip for what is almost always a typo.
+
+### Exactly one request
+
+`GET /ads/{ad_id}` and nothing else -- not the list, not the directory, not a media URL.
+The test mock **throws** on any other URL rather than answering, because a mock that
+answers everything would let a screen quietly start pulling the list and still pass.
+
+### The visible cost of that rule, recorded rather than worked around
+
+`AdDetailOut` carries `contexts[].facebook_page_id` and **no Page or competitor name**.
+Names live only in `GET /competitors`, which this screen must not request. So the Page is
+identified by its id, full value on hover, and **no name is invented** -- stamping a
+placeholder brand would be worse than an identifier, because it would look like data the
+product has. A test asserts no brand name appears anywhere on the screen.
+
+This is the one place where the "one request" rule costs real user-facing quality, and it
+is worth revisiting if the constraint ever loosens.
+
+### AI interpretation states its own status either way
+
+`analysis: null` renders **"not analysed"** and *nothing else* -- not fourteen null fields,
+which would read as "we analysed it and found nothing". When an analysis exists it sits in
+its own violet-tinted surface with a line saying it is a model's reading and not something
+the provider stated, the `AI_INTERPRETATION` badge, and `AIInterpretationBadge` carrying
+`copy_hash` and `source_snapshot_id`. No invented route, no extra request.
+
+`interpretation` is `Record<string, unknown>`, so `InterpretationValue` handles string,
+`null`, number, boolean and object/array, and falls back to JSON for a shape v1 never
+defined. Known fields render in reading order and **unknown keys still render after
+them** -- dropping them would make the panel understate what the model actually said.
+`{}` gets its own sentence, because an empty mapping is a reading of sparse copy rather
+than a missing analysis.
+
+### Media: references, never assets
+
+`MediaAvailability` does the work. No `<img>`, no `<video>`, no `iframe`, no background
+image, no proxy, no download. `source_url` appears as text plus a `data-` attribute.
+`duration_seconds` is displayed exactly as sent -- it is a string, and parsing it for
+computation would reintroduce the float error the string exists to avoid.
+
+The destination URL is the one outbound link, rendered as text with `target="_blank"` and
+`rel="noreferrer noopener"`. An anchor is inert until a person activates it, and a test
+asserts the fetch spy was called exactly once.
+
+### Snapshots: a statement, not a stub
+
+A paragraph saying the history is append-only and served by its own endpoint. Not a link,
+because the route does not exist and a link would 404 in a way that looks like a broken
+product. Not "coming soon", because that is a feature claim about something unbuilt.
+
+### Back navigation
+
+Uses `history.back()` when there is somewhere to go back to, which is what restores the
+library's filter state, because the library URL is still the previous history entry. Falls
+back to `/` when the screen was opened directly.
+
+### UI/UX direction
+
+Sections separated by whitespace and one hairline, not by eight boxed panels -- a detail
+page that boxes everything is a dashboard. Two-col label/value grids for scannability.
+Colour spent only where it carries meaning: the AI surface, and nothing else. Copy is
+**not** truncated here, unlike the list; a cut-off sentence on a detail screen defeats its
+own purpose.
+
+### Tests: 37 added, all mutation-verified
+
+Ten mutations caught by name, then reverted, baseline 37/37: `source_url` rendered as an
+`<img src>`; null analysis rendered as fourteen empty fields; contexts flattened to one;
+`provider_active` null rounded to false; platforms sorted; malformed id still fetched; an
+invented Page name; no way back; the long-running tooltip reworded; interpretation values
+assumed to be strings; unknown interpretation keys dropped.
+
+Two of the first sweep's "misses" were my own bad anchors -- a no-op comment and a
+whitespace mismatch -- so the mutations were rewritten against the components that
+actually own the behaviour (`ContextStatus`, `DurationSignal`) rather than being faked at
+the call site. A mutation that cannot fail is not a mutation.
+
+### Verification
+
+180 frontend tests pass across 5 files. `tsc --noEmit` clean, build clean, 46 modules. No
+backend suite run, because no backend file changed.
