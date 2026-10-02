@@ -18,17 +18,30 @@ import { request } from "./client";
 import { truncateIdentifier } from "../components/provenance/format";
 import type { AdListOut, CompetitorListOut } from "../types/api";
 
-/**
- * The backend's `DEFAULT_PAGE_SIZE` (`services/ad_query.py`). 25 is also its
- * `MAX_PAGE_SIZE` is 100, so this is comfortably inside the allowed range.
- */
-export const PAGE_SIZE = 25;
+// The default and maximum page sizes live in `components/library/adsQuery.ts` as
+// `DEFAULT_PAGE_SIZE` and `MAX_PAGE_SIZE`. A second copy of "25" here would be two
+// constants both claiming to be the backend's `DEFAULT_PAGE_SIZE`, and they would
+// eventually disagree.
 
 export type FetchOptions = { readonly signal?: AbortSignal };
 
-export function fetchAds(options: FetchOptions & { page?: number; pageSize?: number } = {}) {
+/**
+ * One page of ads.
+ *
+ * `query` is passed through as-is, and the caller is responsible for it being already
+ * validated -- `components/library/adsQuery.ts` is what turns URL input into an
+ * allowlisted parameter set. Nothing here re-checks it, because a second validation
+ * layer is a second thing to keep in step and would only ever disagree with the first.
+ *
+ * Defaults are omitted rather than sent as empty values, so "no country filter" is the
+ * absence of `country` and not `country=`.
+ */
+export function fetchAds(
+  query: Readonly<Record<string, string | number>> = {},
+  options: FetchOptions = {},
+) {
   return request<AdListOut>("/ads", {
-    query: { page: options.page ?? 1, page_size: options.pageSize ?? PAGE_SIZE },
+    query,
     ...(options.signal ? { signal: options.signal } : {}),
   });
 }

@@ -3231,3 +3231,104 @@ from where, how long, with what certainty. Media is references only, so there is
 thumbnail grid to build even if one were wanted.
 
 Documentation only. No application, API, schema, database or seed change.
+
+---
+
+## 2026-10-02, S3.3 step 7 -- ads filters, search, sort, pagination
+
+**Frontend only.** No backend, database, seed, migration or AI-fixture change.
+
+### Shape
+
+| File | Role |
+|---|---|
+| `components/library/adsQuery.ts` | **New.** The state object, URL parsing, validation, serialisation, transitions |
+| `components/library/FilterBar.tsx` | **New.** The controls, plus `ActiveFilters` |
+| `components/library/AdsLibrary.tsx` | Reworked: URL state, separate fetches, debounce, pagination |
+| `api/library.ts` | `fetchAds` takes a validated parameter record |
+
+`adsQuery.ts` is pure and DOM-free on purpose. Every filter is a value from a URL a
+person can edit, so the trust boundary is testable directly -- no component, no request.
+
+### Nothing is forwarded on faith
+
+`?sort=;DROP TABLE`, `direction=sideways`, `current_status=winner`, `first_seen_from=yesterday`
+all fall back to defaults rather than being sent. The backend answers a bad sort with a
+400 and a message; in a research tool quietly using the default beats that.
+`page_size=9999` **clamps to 100** rather than resetting -- 9999 is unreasonable, the
+intent behind it is not, and 100 is still valid.
+
+### Provider is a text box, and that was a judgement call
+
+`GET /ads` supports `provider`, but the approved research-filter list does not include it
+and **nothing in the API enumerates provider values**. A dropdown would mean inventing
+data. It is therefore an optional exact-match text input, empty case omitted. The test
+list asked for a provider filter while the approved list excluded it; I followed the test
+list, because the filter is real and the only alternative was no way to use it.
+
+### State lives in the URL and nowhere else
+
+There is no second copy in component state. `pushState` for discrete commits so Back
+works; `replaceState` while the search box settles, so typing does not bury the previous
+page under twenty entries. `popstate` re-reads the URL rather than replaying an undo
+stack.
+
+### One request per distinct query -- and a bug the tests found
+
+The ads effect is keyed **only** on the serialised parameter string, and the request is
+derived from that same string (`adsRequestFromParamString`) rather than from the state
+object. That is not a style choice: with `query` in the dependency list, a `popstate`
+landing on a URL already on screen hands over a *new object with identical values*, React
+sees a changed dependency, and the list refetches for nothing. My first version had
+exactly that, and only a test that **settled before asserting absence** exposed it.
+
+That test shape matters: `waitFor` whose condition is already satisfied returns on its
+first tick, before the effect under test has run. Asserting that a request did *not*
+happen races the thing it is checking and passes for the wrong reason. Two tests were
+passing for exactly that reason until they were changed to settle first.
+
+`/competitors` is fetched **once**, separately -- names do not vary with the filters, and
+refetching per keystroke would double the traffic for no difference in the result. If it
+fails, the grid still renders with Page names falling back to a compact identifier, plus a
+one-line notice.
+
+### UI/UX direction, applied
+
+Search always visible; filters inline on desktop and behind one disclosure on small
+screens. One wrapping grid, so nothing scrolls sideways at any width. The Page select is
+**disabled and empty until a competitor is chosen** -- a list that ignores its parent
+reads as a broken filter, and no UUID is sent before then. Changing competitor clears the
+page, since a page of another competitor would contradict it. Active filters are one muted
+row of removable chips plus "Clear all", never a badge per control. Colour is reserved
+for evidence, so the filter form uses the neutral surface throughout.
+
+### Tests: 53 added, all mutation-verified
+
+Every filter asserted **on the wire**, not on the DOM -- a filter can look right on screen
+and still not be sent. Ten mutations caught by name, then reverted, baseline 83/83: filter
+change not resetting page; hostile URL values forwarded; paging discarding other state;
+empty values sent as empty params; non-date text accepted into a date filter; competitors
+refetched per filter change; effect keyed on object identity; debounce removed; page list
+ignoring its competitor; chip removal not resetting page.
+
+The last one was a genuine miss on the first sweep: `withoutChip` has a separate branch
+for sort and direction, and that branch was the one place a forgotten `page: 1` hides. It
+now has both a pure-function test covering every chip key and an end-to-end one.
+
+### A test-cost fix worth remembering
+
+The mock originally derived rendered rows from `total`, so a test declaring `total: 100`
+rendered twenty-five full ad rows on every state change. Fifty-three tests each driving
+four transitions spent the entire budget in the DOM, and real assertions began failing on
+a **timeout** instead of on a wrong value. `total` and rows-per-page are now separate
+options: pagination reads `total`, not `len(items)`. File duration dropped 40s to 23s and
+the suite stopped being flaky.
+
+Also removed `PAGE_SIZE` from `api/library.ts` once `adsQuery.DEFAULT_PAGE_SIZE` took over
+-- two constants both claiming to be the backend's default page size is a drift waiting to
+happen.
+
+### Verification
+
+143 frontend tests pass across 4 files. `tsc --noEmit` clean, build clean, 41 modules. No
+backend suite run, because no backend file changed.

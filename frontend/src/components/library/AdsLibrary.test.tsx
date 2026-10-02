@@ -17,7 +17,7 @@
  * duration, a `[]` platform list, `provider_active: null` -- are all represented.
  */
 
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { AdsLibrary } from "./AdsLibrary";
@@ -291,9 +291,12 @@ describe("competitor and page name resolution", () => {
     render(<AdsLibrary />);
     await screen.findByTestId("ad-row");
 
-    expect(screen.getByText("Aurora Kitchen Studio")).toBeDefined();
-    expect(screen.getByText("Aurora Kitchen")).toBeDefined();
-    expect(screen.getByText("mock-page-0001")).toBeDefined();
+    // Scoped to the grid: the competitor select also contains the competitor name now
+    // that there is a competitor filter.
+    const grid = within(screen.getByTestId("ads-grid"));
+    expect(grid.getByText("Aurora Kitchen Studio")).toBeDefined();
+    expect(grid.getByText("Aurora Kitchen")).toBeDefined();
+    expect(grid.getByText("mock-page-0001")).toBeDefined();
   });
 
   it("falls back to a compact UUID when no page matches", async () => {
@@ -382,8 +385,10 @@ describe("contexts", () => {
     render(<AdsLibrary />);
     await screen.findAllByTestId("ad-row");
 
-    expect(screen.getByText("Seen")).toBeDefined();
-    expect(screen.getByText("Presumed inactive")).toBeDefined();
+    // Scoped to the row: the status select also offers "Seen" as an option.
+    const row = within(screen.getByTestId("ad-row"));
+    expect(row.getByText("Seen")).toBeDefined();
+    expect(row.getByText("Presumed inactive")).toBeDefined();
     // No single merged status anywhere.
     expect(screen.queryByText("Mixed")).toBeNull();
     const text = document.body.textContent ?? "";
