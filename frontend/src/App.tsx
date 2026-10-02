@@ -1,23 +1,24 @@
 import { useCallback, useEffect, useState } from "react";
 
-import { BASE_PATH, apiUrl } from "./api/client";
+import { AdsLibrary } from "./components/library/AdsLibrary";
 
 /**
- * The shell. Nothing is built yet, on purpose.
+ * The shell: header, theme toggle, the one screen, footer.
  *
- * S3.3 step 4 is the foundation only: React mounts, Tailwind's tokens resolve, the
- * theme can be chosen by the user, and the layout responds. No ad grid, no filters,
- * no detail page, no AI panel, no media, no CSV -- each of those is its own step.
+ * The chrome lives here; the product lives in `components/library`. Still no filters,
+ * no detail page, no snapshots UI, no AI panel, no media, no CSV -- each of those is its
+ * own step, and none of them is stubbed out with a "coming soon" that would imply an
+ * answer this product cannot give.
  *
- * ## The most important line in this file
+ * ## The shell makes no API request of its own
  *
- * **No API request is made on load.** Mounting the shell is not consent to call the
- * backend. A component that fires a fetch in an effect "just to see" makes every
- * page load depend on the API being up, and turns a frontend bug into an outage
- * report. The first request belongs to the first screen that needs data.
+ * Mounting the header, the theme toggle and the footer is not consent to call the
+ * backend. A component that fires a fetch in an effect "just to see" makes every page
+ * load depend on the API being up, and turns a frontend bug into an outage report.
  *
- * `apiUrl` is imported and called, because building a URL is not a request -- that
- * proves the client module loads and exports what the app will use, with no network.
+ * The first request belongs to the first screen that needs data, and that screen is
+ * `AdsLibrary` -- which makes exactly two calls, `GET /ads` and `GET /competitors`. The
+ * shell itself makes none.
  */
 
 type Theme = "light" | "dark";
@@ -74,42 +75,7 @@ export function App() {
       </header>
 
       <main className="page-shell flex-1 py-8">
-        <section
-          aria-labelledby="shell-status"
-          className="rounded-lg border border-dashed border-slate-300 p-6 dark:border-slate-700"
-        >
-          <h2 id="shell-status" className="text-base font-semibold">
-            S3.3 step 4 — frontend foundation
-          </h2>
-          <p className="mt-2 max-w-prose text-sm text-slate-600 dark:text-slate-400">
-            The foundation is in place and deliberately empty. Ads, filters, ad detail,
-            snapshot history, copy analysis, media, and CSV export each arrive in their
-            own step.
-          </p>
-
-          {/* Not a claim about the backend: no request was made to find this out. */}
-          <dl className="mt-4 grid grid-cols-1 gap-x-6 gap-y-2 text-sm sm:grid-cols-2">
-            <div className="flex justify-between gap-4 border-b border-slate-200 pb-2 dark:border-slate-800">
-              <dt className="text-slate-600 dark:text-slate-400">Theme</dt>
-              <dd className="font-medium">{theme}</dd>
-            </div>
-            <div className="flex justify-between gap-4 border-b border-slate-200 pb-2 dark:border-slate-800">
-              <dt className="text-slate-600 dark:text-slate-400">API base path</dt>
-              {/* Rendering the real constant, so this cannot drift from the client. */}
-              <dd className="font-mono text-xs">{BASE_PATH}</dd>
-            </div>
-            <div className="flex justify-between gap-4 border-b border-slate-200 pb-2 dark:border-slate-800">
-              <dt className="text-slate-600 dark:text-slate-400">Example URL</dt>
-              <dd className="truncate font-mono text-xs">
-                {apiUrl("/ads", { page: 1, page_size: 25, competitor_id: null })}
-              </dd>
-            </div>
-            <div className="flex justify-between gap-4 border-b border-slate-200 pb-2 dark:border-slate-800">
-              <dt className="text-slate-600 dark:text-slate-400">Requests on load</dt>
-              <dd className="font-medium">0</dd>
-            </div>
-          </dl>
-        </section>
+        <AdsLibrary />
       </main>
 
       <footer className="border-t border-slate-200 dark:border-slate-800">

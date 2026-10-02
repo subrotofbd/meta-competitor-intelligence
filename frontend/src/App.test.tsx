@@ -15,16 +15,40 @@ import { API_PROXY_TARGET, rewriteApiPath } from "../dev-proxy";
 import { BASE_PATH, ApiError, apiUrl } from "./api/client";
 import type { AnalysisOut } from "./types/api";
 
+/**
+ * The shell itself makes no API request. `App` now renders `AdsLibrary`, which does --
+ * exactly two calls. These tests stub `fetch` so jsdom is never asked to resolve a
+ * relative URL, which it cannot do, and so a mount does not depend on a live backend.
+ */
+function stubFetch() {
+  const requested: string[] = [];
+  const spy = vi.fn(async (input: RequestInfo | URL) => {
+    requested.push(String(input));
+    const body = String(input).startsWith("/api/competitors")
+      ? { items: [] }
+      : { items: [], total: 0, page: 1, page_size: 25 };
+    return new Response(JSON.stringify(body), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  });
+  vi.stubGlobal("fetch", spy);
+  return { requested, spy };
+}
+
 describe("the shell", () => {
-  it("mounts React", () => {
+  it("mounts React", async () => {
+    stubFetch();
     render(<App />);
     expect(screen.getByRole("heading", { name: "Brandset" })).toBeDefined();
+    expect(await screen.findByRole("heading", { name: "Ad Library" })).toBeDefined();
   });
 
-  it("offers both a light and a dark theme, and switching one moves the class on <html>", () => {
+  it("offers both a light and a dark theme, and switching one moves the class on <html>", async () => {
     // The `dark:` variant keys off this class. If it stops being set, every dark
     // token silently stops applying and the app only looks broken in dark mode --
     // which is exactly the failure that would otherwise go unnoticed.
+    stubFetch();
     render(<App />);
     const toggle = screen.getByRole("button", { name: /mode/i });
 
@@ -39,15 +63,19 @@ describe("the shell", () => {
     expect(toggle.getAttribute("aria-pressed")).toBe("true");
   });
 
-  it("makes no API request on load", () => {
-    // The load-bearing assertion of this whole step. Mounting the shell must not
-    // depend on the backend being up.
-    const fetchSpy = vi.fn();
-    vi.stubGlobal("fetch", fetchSpy);
-
+  it("delegates loading to the Ad Library screen, and requests only its two endpoints", async () => {
+    // This test used to assert that mounting made *no* request. That was true while
+    // the shell was empty and stopped being true at step 6, so the assertion is
+    // restated rather than deleted: the shell still fetches nothing itself, and the
+    // only requests in the app are the two the Ad Library needs.
+    const { requested } = stubFetch();
     render(<App />);
 
-    expect(fetchSpy).not.toHaveBeenCalled();
+    await screen.findByTestId("empty-state");
+    expect(requested.map((u) => u.split("?")[0]).sort()).toEqual([
+      "/api/ads",
+      "/api/competitors",
+    ]);
   });
 });
 

@@ -2963,3 +2963,97 @@ rendering nothing.
 
 **Next (not started, needs approval):** the Ads grid and Ad Detail screens that consume
 these.
+
+---
+
+## 2026-10-02, S3.3 step 6 -- ads library grid
+
+The first screen that shows real data. `frontend/src/api/library.ts`,
+`components/library/AdsLibrary.tsx`, `AdsGrid.tsx`, and the shell now renders it.
+**No backend, database, seed, API, or build config change.**
+
+Exactly two requests: `GET /ads` and `GET /competitors`, fired together and aborted on
+unmount. Names are resolved client-side from `/competitors`, keyed on
+`FacebookPageOut.id` and `page.page_id` -- no new endpoint. Against the seeded database
+the join resolves 8 of 8 contexts, and the page's `country` agrees with the context's.
+
+### A contract gap: the grid cannot show copy, and that is the backend's shape
+
+`AdListItemOut` has **no** copy fields. `primary_text`, `headline`, `description` and
+`cta` exist only on `AdDetailOut`. Verified by reading live payloads, not by reading the
+schema.
+
+The Copy column therefore renders `—`, with one note under the grid saying the list
+endpoint does not carry copy text. The alternatives were both wrong: inventing a field,
+or fetching `/ads/{id}` per row to fill a column the detail screen owns -- which would
+issue one request per row and pre-empt the detail screen. **This needs a decision**: if
+a copy preview belongs on the list, the backend has to add it to `AdListItemOut`, which
+is a separate checkpoint and outside this step.
+
+### Two columns I added, and why
+
+The grid also shows the provider's `meta_ad_id` and the Page's `page_id`. Without an
+identifier, two ads from the same page with the same platforms and last-seen date render
+as two indistinguishable rows -- in a competitor-research grid that is a defect, not a
+cosmetic issue. Both are compact, with the full value on hover.
+
+### One real UI defect the tests found
+
+The page name was rendering **twice per row**: once in the identity cell, and again
+inside `ContextStatus` via its `pageName` prop. Passing it once and dropping the prop
+from the other call removed the duplication. The provider page id then had nowhere to
+live, so it moved into the identity block where it belongs.
+
+### Responsive: one DOM, not a table that reflows
+
+A real `<table>` cannot become a stacked card without duplicating every cell or
+scrolling sideways. So this is one CSS grid with ARIA `table`/`row`/`cell` roles:
+screen readers still get a table, and the layout goes from a single stacked column to a
+seven-column research grid purely through breakpoints. One set of cells, no horizontal
+scroll at any width.
+
+Platforms and Copy carry `max-md:block md:hidden lg:block` -- stacked rows on a phone,
+dropped on a tablet, back on a desktop. Competitor, context, duration, last-seen and
+provenance never drop.
+
+### A test flaw that mutation testing exposed
+
+The banned-wording guard scanned `container.textContent` with `\broas\b` boundaries.
+Adjacent elements concatenate with **no separator**, so two column headers read as one
+token -- `...Last seenProvenanceROAS` -- and the word boundary never matched. Adding a
+"ROAS" column header passed the test built to forbid exactly that.
+
+Now it scans **leaf** node texts joined with `" | "`, which restores real boundaries.
+The lesson generalises: `textContent` is not a word list, and any banned-word or
+word-boundary assertion over it is defeatable by layout. Two further mutations (removing
+the copy note; phrasing the result count as "Top N") were missed for the same class of
+reason and now have tests.
+
+Also worth noting: one "caught" mutation in an earlier sweep only passed because the
+mutated file **stopped parsing**. That is not a caught mutation, it is a syntax error.
+The redone version uses valid JSX and is caught by the assertion.
+
+### State
+
+`loading` / `ready` / `error` is one discriminated union, so loading-and-errored cannot
+be represented at all. An error shows the HTTP status and a sentence; the response body
+goes to `console.error` only. `ApiError.detail` can carry a validation problem list with
+internal field names, and a raw driver message on a research screen is noise and a small
+disclosure.
+
+The loading state uses skeleton **bars**, never placeholder rows. An empty state says
+no ads have been observed, and distinguishes that from an ad that stopped -- which stays
+in the list.
+
+### Verification
+
+**86 tests pass** (26 new). `tsc --noEmit` clean, build clean, 39 modules.
+
+Twelve mutations caught by name, then reverted, baseline back to 26/26: platforms
+sorted; `platforms=[]` guessed as Facebook; contexts flattened to the first; an invented
+page name for an unresolved UUID; the error body leaked; a fabricated row in the empty
+state; a fabricated row in the loading state; the copy note removed; the result count
+phrased as a ranking; a ROAS column header; a spend value in a cell.
+
+**Next (not started, needs approval):** ad detail. The copy gap above is the blocker to
+settle first.
