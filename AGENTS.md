@@ -272,6 +272,14 @@ Do not change these without an explicit human decision in the conversation.
 - **Do not** create a git remote or push without explicit instruction.
 - **Do not** replace `uv` with pip, poetry, or conda.
 - **Do not** start S0.2 (or any later checkpoint) without explicit approval.
+- **Do not** build frontend UI that departs from the locked *Brandset Meta Competitor
+  Intelligence UI/UX direction* in `PROJECT_MEMORY.md` (the section headed
+  "PRODUCT UI/UX DIRECTION"). It is binding on every screen, and it reads: clean,
+  premium, spacious, engaging, easy to scan, calm — never noisy or cluttered, never
+  overly dark or cyberpunk. Colour, badges and decorative effects stay restrained and
+  earn their place by communicating meaning. Hierarchy is evidence-first. Light and dark
+  modes must both be polished. Nothing may visually imply a performance metric this
+  product does not have. `PROJECT_MEMORY.md` remains the detailed source of truth.
 
 ---
 
