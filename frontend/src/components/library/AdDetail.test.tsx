@@ -80,6 +80,18 @@ function mockApi(options: { ad?: AdDetailOut; status?: number } = {}) {
     const url = String(input);
     requested.push(url);
 
+    if (url.startsWith(`/api/ads/${AD_ID}/snapshots`)) {
+      if (options.status && options.status >= 400) {
+        return new Response(JSON.stringify({ detail: "Traceback (most recent call last): secret" }), {
+          status: options.status,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return new Response(
+        JSON.stringify({ items: [], total: 0, page: 1, page_size: 25 }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }
     if (/^\/api\/ads\/[0-9a-f-]+$/.test(url)) {
       const status = options.status ?? 200;
       if (status >= 400) {
@@ -127,15 +139,18 @@ afterEach(() => {
  * ============================================================ */
 
 describe("requests", () => {
-  it("loads only GET /ads/{id}", async () => {
+  it("loads GET /ads/{id} and its snapshots, and nothing else", async () => {
+    // Step 9 added the snapshots request. The list and the directory are still absent,
+    // and the record is still fetched exactly once.
     const { requested } = await renderDetail();
-    expect(requested).toEqual([`/api/ads/${AD_ID}`]);
+    const paths = requested.map((u) => u.split("?")[0]).sort();
+    expect(paths).toEqual([`/api/ads/${AD_ID}`, `/api/ads/${AD_ID}/snapshots`]);
   });
 
   it("never requests the list, the directory, or anything external", async () => {
     const { requested } = await renderDetail();
     for (const url of requested) {
-      expect(url).toMatch(/^\/api\/ads\/[0-9a-f-]{36}$/);
+      expect(url).toMatch(/^\/api\/ads\/[0-9a-f-]{36}(\/snapshots)?(\?.*)?$/);
       // No list, no directory, no media, nothing off-origin.
       expect(url).not.toContain("/ads?");
       expect(url).not.toContain("/competitors");
@@ -151,12 +166,17 @@ describe("requests", () => {
     expect(link.getAttribute("rel")).toContain("noreferrer");
     expect(link.getAttribute("target")).toBe("_blank");
     expect(requested.some((u) => u.includes("example.invalid"))).toBe(false);
-    expect(spy).toHaveBeenCalledTimes(1);
+    // Exactly the record and its history -- nothing else was asked for.
+    expect(spy).toHaveBeenCalledTimes(2);
   });
 
   it("triggers no AI generation -- it only reads what is stored", async () => {
     const { requested } = await renderDetail();
-    expect(requested.filter((u) => !u.startsWith(`/api/ads/${AD_ID}`))).toHaveLength(0);
+    for (const url of requested) {
+      expect(url.startsWith(`/api/ads/${AD_ID}`)).toBe(true);
+      // No analysis route exists on this screen, and nothing requests one per snapshot.
+      expect(url).not.toContain("analysis");
+    }
   });
 });
 
@@ -498,6 +518,7 @@ describe("routing and states", () => {
     expect(screen.getByText("Ad not found")).toBeDefined();
     const text = screen.getByTestId("detail-not-found").textContent ?? "";
     expect(text).not.toContain("Traceback");
+    // Not-found never reaches the history, so only the record was requested.
     expect(requested).toEqual([`/api/ads/${AD_ID}`]);
   });
 
@@ -555,11 +576,25 @@ describe("routing and states", () => {
     const gate = new Promise<void>((resolve) => {
       release = resolve;
     });
+    /*
+     * Branched on the URL. This stub used to answer every request with an `AdDetailOut`,
+     * which was correct when the detail screen made exactly one call. Now that it also
+     * fetches history, the snapshots request was being handed an ad payload, and the
+     * panel read `snapshots.items` off an object with no `items` -- an uncaught
+     * `TypeError` that surfaced only in a full-suite run.
+     *
+     * The stub was the wrong one, so the stub is what changes. The component's assumption
+     * that the endpoint returns `SnapshotListOut` is the contract, and weakening the
+     * component to tolerate a malformed body would hide that instead.
+     */
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () => {
+      vi.fn(async (input: RequestInfo | URL) => {
         await gate;
-        return new Response(JSON.stringify(detail()), {
+        const body = String(input).includes("/snapshots")
+          ? { items: [], total: 0, page: 1, page_size: 25 }
+          : detail();
+        return new Response(JSON.stringify(body), {
           status: 200,
           headers: { "content-type": "application/json" },
         });

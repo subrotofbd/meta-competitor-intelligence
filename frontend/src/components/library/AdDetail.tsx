@@ -39,6 +39,7 @@ import { NullValue } from "../provenance/NullValue";
 import { SafeText } from "../provenance/SafeText";
 import { formatUtcDateTime } from "../provenance/format";
 import { PlatformList } from "./AdsGrid";
+import { SnapshotHistory } from "./SnapshotHistory";
 import { adPath, navigate, routeLinkProps } from "../../router";
 
 /**
@@ -121,7 +122,8 @@ export function AdDetail({ adId }: { readonly adId: string }) {
       <DurationSection ad={ad} />
       <AnalysisSection ad={ad} />
       <MediaSection ad={ad} />
-      <SnapshotsSection />
+      {/* The panel fetches its own page of history; the ad above is not refetched by it. */}
+      <SnapshotHistory adId={ad.id} />
     </article>
   );
 }
@@ -576,27 +578,6 @@ function MediaCount({ count }: { readonly count: number }) {
     <span className="text-xs text-slate-500 dark:text-slate-400">
       {count} {count === 1 ? "reference" : "references"}
     </span>
-  );
-}
-
-/* ============================================================
- * Snapshots
- * ============================================================ */
-
-function SnapshotsSection() {
-  return (
-    <Section title="Historical snapshots">
-      {/*
-        A statement, not a link. The history lives behind its own endpoint and its own
-        screen, and inventing a route here would produce a 404 that looks like a broken
-        product. "Coming soon" is avoided for the same reason: it is a feature claim
-        about something not built.
-      */}
-      <p className="text-sm text-slate-600 dark:text-slate-400">
-        Every observation of this ad is retained as a separate snapshot, append-only, and
-        is served by its own endpoint. This page shows only the latest observation.
-      </p>
-    </Section>
   );
 }
 

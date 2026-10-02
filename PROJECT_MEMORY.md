@@ -3444,3 +3444,95 @@ the call site. A mutation that cannot fail is not a mutation.
 
 180 frontend tests pass across 5 files. `tsc --noEmit` clean, build clean, 46 modules. No
 backend suite run, because no backend file changed.
+
+---
+
+## 2026-10-02, S3.3 step 9 -- historical snapshots
+
+**Frontend only.** No backend, database, seed, migration or AI-fixture change.
+
+| File | Change |
+|---|---|
+| `components/library/snapshotPaging.ts` | **New.** Pure URL paging state |
+| `components/library/SnapshotHistory.tsx` | **New.** The panel |
+| `components/library/SnapshotHistory.test.tsx` | **New.** 30 tests |
+| `components/library/AdDetail.tsx` | Placeholder replaced by the live panel |
+| `components/library/AdDetail.test.tsx` | Updated for the second request; one stub fixed |
+| `api/library.ts` | `fetchSnapshots` |
+
+### The history is the product
+
+`ad_snapshots` is append-only and commercial ads that stop running disappear from Meta
+permanently, so this list cannot be re-collected. It is also the whole point: a copy
+preview says what an ad says *now*, and this says what it said before.
+
+Order is the backend's (`created_at DESC, id DESC`), never re-sorted. Re-ordering an
+append-only history would present a sequence of events that never happened. Each row
+carries **its own** copy, its own platforms and its own hashes; the ad's current values are
+never substituted, and a fixture with a loud sentinel string proves it.
+
+### "Copy changed" only where it can be established
+
+The label compares the **stored copy fields** of a snapshot with the next older snapshot
+*in the returned array*. Nothing is hashed, and no stored hash is read for it -- the
+backend's `copy_hash` exists so this is never necessary, and keying a rendering decision
+to a digest the client cannot explain would be worse. When there is no next snapshot in
+the result -- the last row on a page -- the label is the neutral "Observed snapshot",
+because claiming a change against a snapshot the response did not contain is a guess.
+
+### A snapshot's ad_status is not a status
+
+Rendered as "Provider reported at this observation", never as current, global or the S2.3
+context conclusion. The endpoint carries no historical `contexts[]`, so none is invented.
+Hashes are displayed as stored, and a null one is an em dash with **no** wording like
+"unchanged": a hash that was never computed is not a claim that nothing changed.
+
+### Paging keys are prefixed
+
+`snapshot_page` / `snapshot_page_size`, not bare `page`. Ad Detail and the Ads Library are
+different screens both described by a URL, and reusing the bare names makes "which page?"
+ambiguous the moment one link is pasted while the other is on screen. The library's own
+parameters are untouched by anything here.
+
+### Three defects the validation caught
+
+**1. A `>= 3` assertion was defeatable.** The null-hash test counted em dashes and
+required three or more. Mutation -- rendering a null hash as sixty-four zeros instead of a
+dash -- still left three, so it passed. The assertion is now per field: each of *Copy
+hash*, *Creative hash* and *Analysis copy hash* must contain a dash and must not match a
+hex run. Counting was the wrong instrument.
+
+**2. Nested `<dd>`, which React caught.** The `Hash` helper emitted its own `<dt>`/`<dd>`
+and a caller wrapped it in another `<dd>`. Invalid HTML, and a reader using a definition
+list would have got nonsense. Split into `renderHash` (the value) and `HashField` (the
+pairing), so callers own their own markup.
+
+**3. A stub that answered every request with an ad payload.** Ad Detail's skeleton test
+stubbed `fetch` to return `detail()` for *any* URL. That was right when the screen made one
+call; once it also fetched history, the snapshots request received an `AdDetailOut`, the
+panel read `snapshots.items` off an object with no `items`, and an uncaught `TypeError`
+surfaced **only in the full-suite run** — every targeted run was green. The stub was the
+wrong one, so the stub changed; the component's assumption that the endpoint returns
+`SnapshotListOut` is the contract, and guarding against a malformed body would have hidden
+that instead.
+
+Worth recording: all three were invisible to targeted runs. The single-fetch path, the
+per-file suite and the build were all clean while the full suite had an uncaught exception.
+
+### Verification
+
+210 frontend tests across 6 files, **exit code 0 with no unhandled errors** (the check that
+caught defect 3). `tsc --noEmit` clean. Build clean, 48 modules.
+
+Nine mutations caught by name, then reverted, baseline 30/30: history re-sorted; every row
+showing the newest copy; `ad_status` relabelled "Current status"; a change label claimed
+without a comparison; an empty platform list inferred as facebook; a null hash rendered as
+zeros; media rendered as `<img>`; paging dropped from the URL; pagination disabled.
+
+No `<img>`, `<video>`, `<iframe>`, `object` or `embed`; no `dangerouslySetInnerHTML`; no
+inline background image; no direct `fetch`. The only requests the panel makes are
+`GET /ads/{id}` and `GET /ads/{id}/snapshots`. `analysis_copy_hash` is displayed as a stored
+reference and nothing on the screen reads or requests an analysis.
+
+**Next (not started, needs approval):** CSV export UI, and the end-of-S3.3 document
+reconciliation that has been deferred since the step-6 checkpoint.

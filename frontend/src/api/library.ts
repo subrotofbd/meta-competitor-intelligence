@@ -16,7 +16,7 @@
 
 import { request } from "./client";
 import { truncateIdentifier } from "../components/provenance/format";
-import type { AdDetailOut, AdListOut, CompetitorListOut } from "../types/api";
+import type { AdDetailOut, AdListOut, CompetitorListOut, SnapshotListOut } from "../types/api";
 
 // The default and maximum page sizes live in `components/library/adsQuery.ts` as
 // `DEFAULT_PAGE_SIZE` and `MAX_PAGE_SIZE`. A second copy of "25" here would be two
@@ -54,6 +54,27 @@ export function fetchAds(
  */
 export function fetchAd(adId: string, options: FetchOptions = {}) {
   return request<AdDetailOut>(`/ads/${encodeURIComponent(adId)}`, {
+    ...(options.signal ? { signal: options.signal } : {}),
+  });
+}
+
+/**
+ * One page of an ad's observations, newest first.
+ *
+ * Ordering is the backend's: `ad_snapshots.created_at DESC, id DESC`, deterministic, and
+ * never re-sorted here. Re-ordering a history would put observations in a sequence that
+ * never happened.
+ *
+ * `withMedia` is deliberately **not** offered. Every snapshot would then join the media
+ * table, and the panel renders references it already has enough of without that.
+ */
+export function fetchSnapshots(
+  adId: string,
+  paging: { page: number; pageSize: number },
+  options: FetchOptions = {},
+) {
+  return request<SnapshotListOut>(`/ads/${encodeURIComponent(adId)}/snapshots`, {
+    query: { page: paging.page, page_size: paging.pageSize },
     ...(options.signal ? { signal: options.signal } : {}),
   });
 }
