@@ -64,4 +64,71 @@
   .page-shell {
     @apply mx-auto w-full max-w-6xl px-4 sm:px-6 lg:px-8;
   }
+
+  /*
+   * Badges live here rather than as a per-component class string repeated seven
+   * times. Two reasons, and the first is the important one:
+   *
+   * **Tailwind scans source files for literal class names.** A tone chosen at runtime
+   * -- a template like `badge--${tone}`, or a lookup built from a variable -- is invisible
+   * to the scanner, so the class never reaches the stylesheet and the badge renders
+   * unstyled in a production build while looking correct in dev. Written out in full
+   * here, the names are literal and always emitted.
+   *
+   * Tone names are semantic, not colours, so a palette change does not mean hunting
+   * for `badge--violet` in nine components.
+   */
+  .badge {
+    @apply inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium whitespace-nowrap ring-1 ring-inset;
+  }
+
+  /*
+   * One neutral tone for all four `data_origin` values, on purpose.
+   *
+   * `data_origin` answers *how a value was obtained*; it does not answer *how much we
+   * stand behind it*. Giving the four origins four different colours would invite a
+   * reader to rank them, and `official_api` would look stronger than `user_import`
+   * when the difference is only in provenance. The trust axis is `evidence_class`, and
+   * it is the one that gets colour. The two axes stay visually distinct so they cannot
+   * be collapsed into one another (`AGENTS.md` section 7).
+   */
+  .badge--neutral {
+    @apply bg-slate-100 text-slate-700 ring-slate-500/20 dark:bg-slate-800 dark:text-slate-300 dark:ring-slate-400/25;
+  }
+
+  .badge--verified {
+    @apply bg-emerald-50 text-emerald-800 ring-emerald-600/25 dark:bg-emerald-500/10 dark:text-emerald-300 dark:ring-emerald-400/30;
+  }
+
+  .badge--provider {
+    @apply bg-sky-50 text-sky-800 ring-sky-600/25 dark:bg-sky-500/10 dark:text-sky-300 dark:ring-sky-400/30;
+  }
+
+  /*
+   * `ESTIMATE` is amber, deliberately not green. An estimate is not verified data
+   * wearing a friendlier colour, and it must not sit next to `VERIFIED_PUBLIC_DATA`
+   * looking like a shade of the same thing.
+   */
+  .badge--estimate {
+    @apply bg-amber-50 text-amber-900 ring-amber-600/30 dark:bg-amber-500/10 dark:text-amber-300 dark:ring-amber-400/30;
+  }
+
+  /*
+   * `AI_INTERPRETATION` is violet -- a hue that appears nowhere else in the app.
+   *
+   * This is the badge that matters most. Model output is the one thing that can be
+   * mistaken for something the provider said, so it is given a colour of its own
+   * rather than a tint of the provider blue.
+   */
+  .badge--ai {
+    @apply bg-violet-50 text-violet-900 ring-violet-600/30 dark:bg-violet-500/15 dark:text-violet-200 dark:ring-violet-400/35;
+  }
+
+  /*
+   * A short monospace identifier: a truncated `copy_hash` or `snapshot_id`. `tabular-nums`
+   * stops the row reflowing as digits change.
+   */
+  .ref {
+    @apply font-mono text-xs tabular-nums;
+  }
 }

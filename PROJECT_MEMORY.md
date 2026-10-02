@@ -2872,3 +2872,94 @@ Development database untouched and re-verified: `competitors` 1, `ads` 8,
 
 **Next (not started, needs approval):** the first real screen. Ad grid, filters, ad
 detail, snapshot history, AI panel, media and CSV each remain separate steps.
+
+---
+
+## 2026-10-02, S3.3 step 5 -- provenance UI primitives
+
+Eight primitives plus one shared formatting module, under
+`frontend/src/components/provenance/`. **No backend, database, seed, API, or build
+config change.**
+
+| File | Rule it enforces |
+|---|---|
+| `NullValue.tsx` | missing renders `—`; **a real `0` renders `0`** |
+| `DataOriginBadge.tsx` | all four origins, one neutral tone |
+| `EvidenceClassBadge.tsx` | four evidence classes, tinted |
+| `AIInterpretationBadge.tsx` | carries `copy_hash` + `source_snapshot_id`, no link, no request |
+| `DurationSignal.tsx` | days, bucket, always the source, `LONG-RUNNING SIGNAL` |
+| `ContextStatus.tsx` | three statuses, tri-state `provider_active` |
+| `MediaAvailability.tsx` | "bytes not acquired", `source_url` as text only |
+| `SafeText.tsx` | nullable strings as plain text |
+| `format.ts` | UTC date formatting, identifier truncation |
+
+### Decisions worth keeping
+
+**The two provenance axes are styled differently on purpose.** All four `data_origin`
+values share one neutral tone, because that axis answers *how a value was obtained* and
+colour-coding it would invite ranking the four -- `official_api` would read as more
+trustworthy than `user_import`. Colour lives on `evidence_class`, which answers *how much
+we stand behind it*. `AI_INTERPRETATION` gets violet, a hue used nowhere else, so model
+output cannot be mistaken for something the provider said. `ESTIMATE` is amber, never a
+pale green: an estimate is not verified data in a friendlier colour.
+
+**Badge classes are literal CSS, not runtime-composed.** Tailwind scans source files for
+literal class names, so a tone chosen by template or variable is never emitted -- the
+badge renders unstyled in production while looking correct in dev. All five tones are
+written out in `styles/index.css` and verified present in the built stylesheet.
+
+**No `<a>` anywhere, in either direction.** `AIInterpretationBadge` has no router to
+link to, and an invented `href` looks real and 404s -- worse, a plausible guess like
+`/ads/{id}#analysis` would freeze a routing decision into a backwards-compatibility
+promise. It exposes `data-copy-hash` and `data-source-snapshot-id` instead. Conversely
+`MediaAvailability` renders `source_url` as **text, not a link**: an anchor does not
+fetch on render, but it would send the reader to the provider's CDN around the
+authenticated media route `AGENTS.md` section 6 requires. Both identifiers are carried
+because analysis is copy-scoped -- `copy_hash` identifies the words,
+`source_snapshot_id` the observation, and the latter is routinely *not* the ad's latest.
+
+**`not_seen_since` never becomes "stopped"**, and `presumed_inactive` renders the word
+**"Presumed"** as part of the label, not as styling. `provider_active` is tri-state and
+`null` renders `—`; rounding it to `false` would manufacture "we checked and it was not
+running" out of the absence of a check. `false` reads "not reported active", because it
+is the provider declining to assert activity, not this product concluding anything.
+
+**Date formatting returns the input string if it will not parse.** `toISOString()` throws
+on a malformed timestamp and takes the whole page down; `String(date)` renders the literal
+text `Invalid Date` to the user. UTC and a fixed format, so two readers see the same
+string and a screenshot matches the database.
+
+### One test bug worth remembering
+
+My first mutation sweep reported **MISSED for all seven mutations** when every one of
+them had in fact failed. Vitest writes failure detail to **stderr**; the script read
+only stdout, so the counts arrived and the names never did. The lesson is the shape of
+it: a mutation harness that cannot see failures will happily tell you your tests are
+weak when they are strong. It also flagged a real bug -- a stray `mutate.py` written into
+the repository root by a relative path, since removed.
+
+### Verification
+
+**60 tests pass** (50 new, 10 from step 4). Build clean including `tsc --noEmit`.
+Stylesheet grew 11.28 -> 20.19 kB and all five badge tones are present in the built
+CSS -- the evidence that Tailwind emitted them.
+
+All seven load-bearing rules were **mutation-checked and caught by name**, then
+reverted, baseline back to 50/50:
+
+| Mutation | Test that caught it |
+|---|---|
+| `NullValue` truthiness check (`0` -> `—`) | `renders 0 as 0, not as an em dash` |
+| inject `<img src={source_url}>` | 7 MediaAvailability tests |
+| `not_seen_since` -> "Stopped" | `never renders not_seen_since as stopped` |
+| tooltip text reworded | `renders the long-running tooltip with exactly the required text` |
+| `presumed_inactive` -> "Inactive" | `keeps presumed_inactive worded as a presumption` |
+| `AI_INTERPRETATION` shares provider tone | `gives AI_INTERPRETATION a tone of its own` |
+| duration source removed | `always displays the source, for both values` |
+
+The wording ban (`winner` / `loser` / `best` / `top performer`) is asserted against the
+combined rendered text of every primitive, with a length floor so it cannot pass by
+rendering nothing.
+
+**Next (not started, needs approval):** the Ads grid and Ad Detail screens that consume
+these.
